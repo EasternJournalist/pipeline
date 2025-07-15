@@ -4,10 +4,11 @@ Multithread python pipeline framework.
 
 * Preserving first-in-first-out order of data.
 * Supporting complex and non-linear data flow.
-* Maximizing thouroughput. Each stage runs in parallel. 
+* Maximizing thouroughput. 
 * Easy and intuitive. Minimal code to build a pipeline. 
+* Suitable for IO-bound and numpy/pytorch-based applications with complex streamed data.
 
-# Componets
+## Supported Componets
 
 <table>
   <thead>
@@ -86,49 +87,96 @@ Multithread python pipeline framework.
 </table>
 
 
-# Usage
+## Example
+
+```mermaid
+graph TD
+    A["**A** (30ms)"] --> B_in
+    
+    subgraph Parallel Worker Pool
+      B_in((Pool)) --> B1["**B1** (150ms)"] & B2["**B2** (150ms)"] & B3["**B3** (150ms)"] --> B_out((Pool))
+    end
+    B_out --> C_in
+
+    subgraph Distributed Block **C**
+      C_in[/Split\]
+      C_out[\Merge/]
+      C_in -->|x| CX["**CX** (40ms)"] --> C_out
+      C_in -->|y| CY_in 
+      
+      subgraph Parallel Worker Pool **CY**
+        CY_in((Pool)) --> CY1["**CY1** (120ms)"] & CY2["**CY2** (120ms)"] & CY3["**CY3** (120ms)"] --> CY_out((Pool))
+      end
+      CY_out --> C_out
+    end
+    C_out --> D["**D** (40ms)"]
+```
+
+- If processing serially, each item takes 30 + 150 + 40 + 120 + 40 = 380ms.  
+- With pipeline, we can achieve the **theoretical optimal throughput of 50ms per item**.
+
+```python
+import pipeline
+
+pipe = pipeline.Sequential([ 
+    A, 
+    pipeline.Parallel([B, B, B]),
+    pipeline.Distribute({
+      'x': CX, 
+      'y': pipeline.Parallel([CY, CY, CY]), 
+    }),  .
+    D,
+])
+```
+
+Test the full example code below:
 
 ```python
 import time
 import pipeline
 
-
-def a(data):
-    time.sleep(0.02)
+# Define the functions of each node
+def A(data):
+    time.sleep(0.03)
     return data * 4 - 3
 
-def b(data):
-    time.sleep(0.1)
+def B(data):
+    time.sleep(0.15)
     return {'x': data * 2, 'y': 1}
 
-def c_x(data):
-    time.sleep(0.05)
+def CX(data):
+    time.sleep(0.04)
     return data ** 2
 
-def c_y(data):
-    time.sleep(0.05)
+def CY(data):
+    time.sleep(0.12)
     return data - 1
 
-def d(data):
+def D(data):
     time.sleep(0.05)
     return data['x'] + data['y']
 
 
 # Build the pipeline
-pipe = pipeline.Sequential([                    # A sequential pipeline
-    a,                                          # Function wrapped as a node automatically
-    pipeline.Parallel([b, b, b]),               # Three parallel branches
-    pipeline.Distribute({'x': c_x, 'y': c_y}),  # Split the dict and distribute to two branches
-    pipeline.Buffer(3),                         # The buffer can smooth out variations in processing time within the pipeline.
-    d,
+pipe = pipeline.Sequential([ 
+    A, 
+    pipeline.Parallel([B, B, B]),
+    pipeline.Distribute({
+      'x': CX, 
+      'y': pipeline.Parallel([CY, CY, CY]), 
+    }),
+    D,
 ])
 
 # Start the pipeline and run it
 with pipe:  
     
-    # Usage 1 - For regular iterable data source
-    for x in pipe(range(100)):
-        print(x)
+    last_time = time.time()
+    # Pass an iterable input to the pipeline and iterate over the results
+    for i, result in zip(range(100), pipe(range(100))):
+        now = time.time()
+        print(f"No. {i}, result: {result}, throughput: {now - last_time:.4f}s/it.")
+        last_time = now
 
     # Usage 2 - For irregularlly sourced data
     pipe.put(10)

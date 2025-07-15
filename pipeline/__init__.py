@@ -6,6 +6,7 @@ from threading import Thread, Event
 import threading
 import inspect
 import time
+import random
 import itertools
 import functools
 
@@ -25,6 +26,7 @@ __all__ = [
 ]
 
 TERMINATE_CHECK_INTERVAL = 0.5
+DEFAULT_QUEUE_SIZE = 1
 
 
 class Terminate(Exception):
@@ -77,7 +79,7 @@ class Node:
     def input(self) -> Queue:
         with self._in_queue_lock:
             if self._input is None:
-                self._input = Queue(maxsize=1)
+                self._input = Queue(maxsize=DEFAULT_QUEUE_SIZE)
         return self._input
 
     @input.setter
@@ -91,7 +93,7 @@ class Node:
     def output(self) -> Queue:
         with self._out_queue_lock:
             if self._output is None:
-                self._output = Queue(maxsize=1)
+                self._output = Queue(maxsize=DEFAULT_QUEUE_SIZE)
         return self._output
     
     @output.setter
@@ -403,14 +405,17 @@ class Parallel(ThreadingNode):
             self.nodes.append(node)
         self.fifo_order = Queue()
         self.fifo_lock = threading.Lock()
-        self.thread_functions = [functools.partial(self._in_thread_fn, node) for node in self.nodes] + [self._out_thread_fn]
+        self.thread_functions = [self._in_thread_fn, self._out_thread_fn]
 
-    def _in_thread_fn(self, node: Node):
+    def _in_thread_fn(self):
         try:
             while True:
-                with self.fifo_lock:
-                    item = _get_queue(self.input, self._terminate_flag)
-                    self.fifo_order.put(node)
+                item = _get_queue(self.input, self._terminate_flag)
+                qsizes = [node.input.qsize() for node in self.nodes]
+                min_queue_size = min(qsizes)
+                idle = [i for i in range(len(self.nodes)) if qsizes[i] == min_queue_size]
+                node = self.nodes[random.choice(idle)]
+                self.fifo_order.put(node)
                 _put_queue(node.input, item, self._terminate_flag)
         except Terminate:
             return
