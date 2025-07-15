@@ -3,7 +3,8 @@
 Multithread python pipeline framework.
 
 * Preserving first-in-first-out order of data.
-* Maximize thouroughput. Each stage runs in parallel. 
+* Supporting complex and non-linear data flow.
+* Maximizing thouroughput. Each stage runs in parallel. 
 * Easy and intuitive. Minimal code to build a pipeline. 
 
 # Componets
