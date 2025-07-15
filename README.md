@@ -8,6 +8,12 @@ Multithread python pipeline framework.
 * Easy and intuitive. Minimal code to build a pipeline. 
 * Suitable for IO-bound and numpy/pytorch-based applications with complex streamed data.
 
+## Install
+
+```
+pip install git+https://github.com/EasternJournalist/pipeline.git
+```
+
 ## Supported Componets
 
 <table>
