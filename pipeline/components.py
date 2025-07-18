@@ -270,7 +270,7 @@ class Batch(ThreadingNode):
                             break
                     # Try to get an item within the remaining time
                     try:
-                        item = _get_queue(input, self._terminate_flag, timeout)
+                        item = _get_queue(self.input, self._terminate_flag, timeout)
                     except Empty:
                         break
                     # If the item is EndOfInput, break the loop
