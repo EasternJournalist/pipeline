@@ -411,31 +411,36 @@ class Parallel(ThreadingNode):
             else:
                 raise ValueError(f"Invalid node type: {type(node)}")
             self.nodes.append(node)
-        self.fifo_order = Queue()
-        self.fifo_lock = threading.Lock()
+        self.working_nodes = Queue()
+        self.idle_nodes = Queue()
         self.thread_functions = [self._in_thread_fn, self._out_thread_fn]
 
     def _in_thread_fn(self):
         try:
             while True:
                 item = _get_queue(self.input, self._terminate_flag)
-                idle_node = random.choice(min(self.nodes, key=lambda n: n.input.qsize()))
-                self.fifo_order.put(idle_node)
-                _put_queue(idle_node.input, item, self._terminate_flag)
+                node = _get_queue(self.idle_nodes, self._terminate_flag)
+                self.working_nodes.put(node)
+                _put_queue(node.input, item, self._terminate_flag)
         except Terminate:
             return
     
     def _out_thread_fn(self):
         try:
             while True:
-                node = _get_queue(self.fifo_order, self._terminate_flag)
+                node = _get_queue(self.working_nodes, self._terminate_flag)
                 item = _get_queue(node.output, self._terminate_flag)
                 _put_queue(self.output, item, self._terminate_flag)
+                _put_queue(self.idle_nodes, node, self._terminate_flag)
         except Terminate:
             return
 
     def start(self):
         super().start()
+        self.idle_nodes = Queue()
+        self.fifo_order = Queue()
+        for node in self.nodes:
+            self.idle_nodes.put(node)
         for node in self.nodes:
             node.start()
     
