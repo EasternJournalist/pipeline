@@ -22,7 +22,6 @@ pip install git+https://github.com/EasternJournalist/pipeline.git
       <th>Category</th>
       <th>Component</th>
       <th>Description</th>
-      <th>Typical Behavior</th>
     </tr>
   </thead>
   <tbody>
@@ -31,63 +30,56 @@ pip install git+https://github.com/EasternJournalist/pipeline.git
       <td rowspan="2">Basic</td>
       <td><code>Worker</code></td>
       <td>Applies a user-defined function to each input item.</td>
-      <td>Stateless map operation</td>
     </tr>
     <tr>
       <td><code>Source</code></td>
       <td>Generates data into the pipeline; usually the starting point.</td>
-      <td>Data emitter</td>
+    </tr>
+    <!-- Execution -->
+    <tr>
+      <td rowspan="2">Structural</td>
+      <td><code>Sequential</code></td>
+      <td>Pipeline of nodes in a sequential order.</td>
+    </tr>
+    <tr>
+      <td><code>Parallel</code></td>
+      <td>Runs a pool of parallel nodes.</td>
     </tr>
     <!-- Batching -->
     <tr>
-      <td rowspan="3">Batching & Flow Control</td>
+      <td rowspan="4">Batching & Flow Control</td>
       <td><code>Batch</code></td>
-      <td>Groups incoming items into batches of a given size.</td>
-      <td>Creates mini-batches like <code>[x1, x2, x3]</code></td>
+      <td>Groups incoming items into batches of a given size, or within time of patience.</td>
     </tr>
     <tr>
       <td><code>Unbatch</code></td>
-      <td>Splits batched input back into individual items.</td>
-      <td>Yields items one by one from a list</td>
+      <td>Splits batched input into individual items.</td>
     </tr>
     <tr>
       <td><code>Buffer</code></td>
       <td>Buffers items in a queue between upstream and downstream stages.</td>
-      <td>Decouples speed mismatch</td>
-    </tr>
-    <!-- Execution -->
-    <tr>
-      <td rowspan="2">Execution</td>
-      <td><code>Sequential</code></td>
-      <td>Processes items one at a time in arrival order.</td>
-      <td>Single-threaded, ordered</td>
     </tr>
     <tr>
-      <td><code>Parallel</code></td>
-      <td>Runs multiple workers concurrently with the same logic.</td>
-      <td>Thread/worker pool</td>
+      <td><code>Filter</code></td>
+      <td>Filter items.</td>
     </tr>
     <!-- Routing -->
     <tr>
       <td rowspan="4">Multi-Branch Routing</td>
       <td><code>Distribute</code></td>
-      <td>Takes a dictionary input and sends each value to a named downstream branch.</td>
-      <td><code>{"a": x, "b": y}</code> → branches "a", "b"</td>
+      <td>Takes a dictionary input and sends each value to corresponding named branch.
     </tr>
     <tr>
       <td><code>Broadcast</code></td>
-      <td>Sends a copy of input to all downstream branches.</td>
-      <td>Broadcast to all, collect results as list</td>
+      <td>Sends a copy of input to all branches.</td>
     </tr>
     <tr>
       <td><code>Switch</code></td>
       <td>Uses a key function to send data to a single selected branch.</td>
-      <td>Single-target routing</td>
     </tr>
     <tr>
       <td><code>Router</code></td>
       <td>Uses a key function to send data to multiple selected branches.</td>
-      <td>Multi-target routing, collect results as dict</td>
     </tr>
   </tbody>
 </table>

@@ -22,6 +22,7 @@ __all__ = [
     'Broadcast',
     'Switch',
     'Router',
+    'Filter'
 ]
 
 
@@ -54,16 +55,21 @@ def _get_queue(queue: Queue, terminate_flag: Event, timeout: float = None):
                 raise Empty()
 
 
-def _put_queue(queue: Queue, item: Any, terminate_flag: Event):
+def _put_queue(queue: Queue, item: Any, terminate_flag: Event, timeout: float = None):
     while True:
         try:
-            queue.put(item, block=True, timeout=TERMINATE_CHECK_INTERVAL)
+            queue.put(item, block=True, timeout=TERMINATE_CHECK_INTERVAL if timeout is None else min(timeout, TERMINATE_CHECK_INTERVAL))
             if terminate_flag.is_set():
                 raise Terminate()
             return
         except Full:
             if terminate_flag.is_set():
                 raise Terminate()
+            
+        if timeout is not None:
+            timeout -= TERMINATE_CHECK_INTERVAL
+            if timeout <= 0:
+                raise Full()
 
 
 class Node:
@@ -114,19 +120,21 @@ class Node:
     def stop(self):
         self.terminate()
     
-    def put(self, data: Any, block: bool = True) -> None:
+    def put(self, data: Any, timeout: float = None) -> None:
         assert self._is_started, "Node is not started."
-        if block:
-            _put_queue(self.input, data, self._terminate_flag)
-        else:
-            self.input.put(data, block=False)
+        _put_queue(self.input, data, self._terminate_flag, timeout)
     
-    def get(self, block: bool = True) -> Any:
+    def get(self, timeout: float = None) -> Any:
         assert self._is_started, "Node is not started."
-        if block:
-            return _get_queue(self.output, self._terminate_flag)
-        else:
-            return self.output.get(block=False)
+        return _get_queue(self.output, self._terminate_flag, timeout)
+
+    def put_nowait(self, data: Any) -> None:
+        assert self._is_started, "Node is not started."
+        self.input.put_nowait(data)
+    
+    def get_nowait(self) -> Any:
+        assert self._is_started, "Node is not started."
+        return self.output.get_nowait()
 
     def __enter__(self):
         self.start()
@@ -411,12 +419,9 @@ class Parallel(ThreadingNode):
         try:
             while True:
                 item = _get_queue(self.input, self._terminate_flag)
-                qsizes = [node.input.qsize() for node in self.nodes]
-                min_queue_size = min(qsizes)
-                idle = [i for i in range(len(self.nodes)) if qsizes[i] == min_queue_size]
-                node = self.nodes[random.choice(idle)]
-                self.fifo_order.put(node)
-                _put_queue(node.input, item, self._terminate_flag)
+                idle_node = random.choice(min(self.nodes, key=lambda n: n.input.qsize()))
+                self.fifo_order.put(idle_node)
+                _put_queue(idle_node.input, item, self._terminate_flag)
         except Terminate:
             return
     
@@ -704,3 +709,29 @@ class Broadcast(ThreadingNode):
         for node in self.branches.values():
             node.stop()
         
+
+class Filter(ThreadingNode):
+    """
+    A node that filters items based on a predicate function. 
+    If the predicate returns True, the item is passed to the output queue, otherwise it is discarded.
+    """
+    def __init__(self, predicate: Optional[Callable[[Any], bool]] = None):
+        """
+        ### Parameters
+        - `predicate`: A function that takes an item and returns True if the item should be passed to the output queue. Default to pass items that are not None.
+        """
+        super().__init__()
+        self.predicate = predicate
+        self.thread_functions = [self.loop]
+
+    def loop(self):
+        try:
+            while True:
+                item = _get_queue(self.input, self._terminate_flag)
+                if isinstance(item, EndOfInput):
+                    _put_queue(self.output, EndOfInput(), self._terminate_flag)
+                    continue
+                if (self.predicate is None and item is not None) or (self.predicate is not None and self.predicate(item)):
+                    _put_queue(self.output, item, self._terminate_flag)
+        except Terminate:
+            return
