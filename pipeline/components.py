@@ -397,22 +397,28 @@ class Parallel(ThreadingNode):
     """
     nodes: List[Node]
 
-    def __init__(self, nodes: Iterable[Node]):
+    def __init__(self, nodes_or_callable: Union[Callable, Sequence[Node]], num_duplicates: int = None):
         super().__init__()
-        self.nodes = []
-        for node in nodes:
-            if isinstance(node, Node):
-                pass
-            elif isinstance(node, Callable):
-                if inspect.isgeneratorfunction(node):
-                    node = Source(node)
+        if isinstance(nodes_or_callable, Callable):
+            assert num_duplicates is not None, "Duplicates count must be specified for callable"
+            self.nodes = [Worker(nodes_or_callable) for _ in range(num_duplicates)]
+        else:
+            self.nodes = []
+            for node in nodes_or_callable:
+                if isinstance(node, Node):
+                    pass
+                elif isinstance(node, Callable):
+                    if inspect.isgeneratorfunction(node):
+                        node = Source(node)
+                    else:
+                        node = Worker(node)
                 else:
-                    node = Worker(node)
-            else:
-                raise ValueError(f"Invalid node type: {type(node)}")
-            self.nodes.append(node)
+                    raise ValueError(f"Invalid node type: {type(node)}")
+                self.nodes.append(node)
         self.working_nodes = Queue()
         self.idle_nodes = Queue()
+        for node in self.nodes:
+            self.idle_nodes.put(node)
         self.thread_functions = [self._in_thread_fn, self._out_thread_fn]
 
     def _in_thread_fn(self):
@@ -437,10 +443,6 @@ class Parallel(ThreadingNode):
 
     def start(self):
         super().start()
-        self.idle_nodes = Queue()
-        self.fifo_order = Queue()
-        for node in self.nodes:
-            self.idle_nodes.put(node)
         for node in self.nodes:
             node.start()
     
