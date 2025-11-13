@@ -171,7 +171,7 @@ with pipe:
     
     last_time = time.time()
     # Pass an iterable input to the pipeline and iterate over the results
-    for i, result in zip(range(100), pipe(range(100))):
+    for i, result in enumerate(pipe(range(100))):
         now = time.time()
         print(f"No. {i}, result: {result}, throughput: {now - last_time:.4f}s/it.")
         last_time = now

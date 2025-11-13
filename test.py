@@ -26,20 +26,20 @@ def D(data):
 # Build the pipeline
 pipe = pipeline.Sequential([ 
     A, 
-    pipeline.Parallel([B, B, B]),
+    pipeline.Parallel(B, num_duplicates=3),
     pipeline.Distribute({
       'x': CX, 
-      'y': pipeline.Parallel([CY, CY, CY]), 
+      'y': pipeline.Parallel(CY, num_duplicates=3), 
     }),
     D,
 ])
 
+
 # Start the pipeline and run it
 with pipe:  
-    
     last_time = time.time()
-
-    for i, result in zip(range(100), pipe(range(100))):
+    for i, result in enumerate(pipe(range(100))):
         now = time.time()
         print(f"No. {i}, result: {result}, throughput: {now - last_time:.4f}s/it.")
         last_time = now
+print(pipe)

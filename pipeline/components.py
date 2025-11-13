@@ -1,7 +1,6 @@
 from typing import *
-from queue import Empty, Full
-from threading import Thread
-from queue import Queue
+from .queue import Empty, Full, ShutDown
+from .queue import Queue
 from threading import Thread, Event
 import threading
 import inspect
@@ -26,107 +25,120 @@ __all__ = [
 ]
 
 
-TERMINATE_CHECK_INTERVAL = 0.5
 DEFAULT_QUEUE_SIZE = 1
 
 
-class Terminate(Exception):
-    pass
+def _add_indent(s: str, num_spaces: int = 4) -> str:
+    indent = ' ' * num_spaces
+    return indent + s.replace('\n', '\n' + indent)
 
-
+def _format_time(seconds: float) -> str:
+    if seconds < 1e-3:
+        return f"{seconds * 1e6:.2f}µs"
+    elif seconds < 1:
+        return f"{seconds * 1e3:.2f}ms"
+    elif seconds < 60:
+        return f"{seconds:.2f}s"
+    elif seconds < 3600:
+        return f"{seconds / 60:.2f}min"
+    else:
+        return f"{seconds / 3600:.2f}h"
+    
 class EndOfInput:
     pass
 
 
-def _get_queue(queue: Queue, terminate_flag: Event, timeout: float = None):
-    while True:
-        try:
-            item = queue.get(block=True, timeout=TERMINATE_CHECK_INTERVAL if timeout is None else min(timeout, TERMINATE_CHECK_INTERVAL))
-            if terminate_flag.is_set():
-                raise Terminate()
-            return item
-        except Empty:
-            if terminate_flag.is_set():
-                raise Terminate()
-            
-        if timeout is not None:
-            timeout -= TERMINATE_CHECK_INTERVAL
-            if timeout <= 0:
-                raise Empty()
+class ProfiledQueue(Queue):
+    """A Queue that records the get/put block time for profiling purposes."""
 
+    def __init__(self, maxsize: int = 0):
+        super().__init__(maxsize)
+        self.profiling_mutex = threading.Lock()
+        self.total_get_block_time = 0.0
+        self.total_put_block_time = 0.0
+        self.count_get = 0
+        self.count_put = 0
 
-def _put_queue(queue: Queue, item: Any, terminate_flag: Event, timeout: float = None):
-    while True:
-        try:
-            queue.put(item, block=True, timeout=TERMINATE_CHECK_INTERVAL if timeout is None else min(timeout, TERMINATE_CHECK_INTERVAL))
-            if terminate_flag.is_set():
-                raise Terminate()
-            return
-        except Full:
-            if terminate_flag.is_set():
-                raise Terminate()
-            
-        if timeout is not None:
-            timeout -= TERMINATE_CHECK_INTERVAL
-            if timeout <= 0:
-                raise Full()
+    def put(self, item, block=True, timeout=None):
+        start_time = time.perf_counter()
+        super().put(item, block, timeout)
+        end_time = time.perf_counter()
+        if not isinstance(item, EndOfInput):
+            with self.profiling_mutex:
+                self.total_put_block_time += end_time - start_time
+                self.count_put += 1
+
+    def get(self, block=True, timeout=None):
+        start_time = time.perf_counter()
+        item = super().get(block, timeout)
+        end_time = time.perf_counter()
+        if not isinstance(item, EndOfInput):
+            with self.profiling_mutex:
+                self.total_get_block_time += end_time - start_time
+                self.count_get += 1
+        return item
 
 
 class Node:
     def __init__(self):
         self._in_queue_lock = threading.Lock()
         self._out_queue_lock = threading.Lock()
-        self._terminate_flag = threading.Event()
         self._input = None
         self._output = None
         self._is_started = False
+        self._is_shutdown = False
 
     @property
-    def input(self) -> Queue:
+    def input(self) -> ProfiledQueue:
         with self._in_queue_lock:
             if self._input is None:
-                self._input = Queue(maxsize=DEFAULT_QUEUE_SIZE)
+                self._input = ProfiledQueue(maxsize=DEFAULT_QUEUE_SIZE)
         return self._input
 
     @input.setter
-    def input(self, value: Queue):
+    def input(self, value: ProfiledQueue):
         with self._in_queue_lock:
             if self._input is not None:
                 raise AttributeError("Node input is already set.")
             self._input = value
 
     @property
-    def output(self) -> Queue:
+    def output(self) -> ProfiledQueue:
         with self._out_queue_lock:
             if self._output is None:
-                self._output = Queue(maxsize=DEFAULT_QUEUE_SIZE)
+                self._output = ProfiledQueue(maxsize=DEFAULT_QUEUE_SIZE)
         return self._output
     
     @output.setter
-    def output(self, value: Queue):
+    def output(self, value: ProfiledQueue):
         with self._out_queue_lock:
             if self._output is not None:
                 raise AttributeError("Node output is already set.")
             self._output = value
 
     def start(self):
+        "Start the node."
         self._is_started = True
-        self._terminate_flag = threading.Event()
 
-    def terminate(self):
-        self._is_started = False
-        self._terminate_flag.set()
+    def shutdown(self):
+        "Send shutdown signal without waiting for threads/processes to finish. NOTE: Once shutdown is called, the node cannot be restarted."
+        self._is_shutdown = True
+        self.input.shutdown()
+        self.output.shutdown()
 
     def stop(self):
-        self.terminate()
-    
+        "Stop the node and wait for all threads/processes to finish. NOTE: Once stop is called, the node cannot be restarted."
+        self.shutdown()
+
     def put(self, data: Any, timeout: float = None) -> None:
+        "Put data into the input queue. Blocks if the input queue is full."
         assert self._is_started, "Node is not started."
-        _put_queue(self.input, data, self._terminate_flag, timeout)
+        self.input.put(data, timeout=timeout)
     
     def get(self, timeout: float = None) -> Any:
+        "Get data from the output queue. Blocks if the output queue is empty."
         assert self._is_started, "Node is not started."
-        return _get_queue(self.output, self._terminate_flag, timeout)
+        return self.output.get(timeout=timeout)
 
     def put_nowait(self, data: Any) -> None:
         assert self._is_started, "Node is not started."
@@ -147,6 +159,18 @@ class Node:
         assert self._is_started, "Node is not started."
         return NodeIterator(self, iterator)
 
+    def get_profile_str(self) -> str:
+        if not self._is_started:
+            return "Not started"
+        avg_put_block_time = self.input.total_put_block_time / max(1, self.input.count_put)
+        avg_get_block_time = self.output.total_get_block_time / max(1, self.output.count_get)
+        profile_str = f"Blocking Time Get/Put = {_format_time(avg_get_block_time)}/{_format_time(avg_put_block_time)}"\
+                        f" | Count Get/Put = {self.output.count_get}/{self.input.count_put}"
+        return profile_str
+
+    def __repr__(self):
+        return f"Node(class={self.__class__.__name__})   {self.get_profile_str()}"
+
 
 class NodeIterator:
     def __init__(self, node: Node, iterator: Iterable):
@@ -159,9 +183,12 @@ class NodeIterator:
         return self
     
     def _source_thread_fn(self):
-        for item in self.iterator:
-            _put_queue(self.node.input, item, self.node._terminate_flag)
-        _put_queue(self.node.input, EndOfInput(), self.node._terminate_flag)
+        try:
+            for item in self.iterator:
+                self.node.put(item)
+            self.node.put(EndOfInput())
+        except ShutDown:
+            pass
     
     def __next__(self):
         item = self.node.get()
@@ -173,7 +200,6 @@ class NodeIterator:
 class ThreadingNode(Node):
     thread_functions: List[Callable]
     threads: List[Thread]
-    terminate_flag: Event
 
     def start(self):
         super().start()
@@ -192,6 +218,8 @@ class Worker(ThreadingNode):
         super().__init__()
         self.work_fn = work
         self.thread_functions = [self.loop]
+        self.working_time = 0.0
+        self.count_work = 0
 
     def init(self) -> None:
         """
@@ -211,14 +239,36 @@ class Worker(ThreadingNode):
         self.init()
         try:
             while True:
-                item = _get_queue(self.input, self._terminate_flag)
+                item = self.input.get()
                 if isinstance(item, EndOfInput):
-                    _put_queue(self.output, EndOfInput(), self._terminate_flag)
+                    self.output.put(EndOfInput())
                     continue
+                start_time = time.perf_counter()
                 result = self.work(item)
-                _put_queue(self.output, result, self._terminate_flag)
-        except Terminate:
+                end_time = time.perf_counter()
+                self.working_time += end_time - start_time
+                self.count_work += 1
+                self.output.put(result)
+        except ShutDown:
             return
+
+    def get_profile_str(self) -> str:
+        if not self._is_started:
+            return "Not started."
+        avg_put_block_time = self.input.total_put_block_time / max(1, self.input.count_put)
+        avg_get_block_time = self.output.total_get_block_time / max(1, self.output.count_get)
+        avg_work_time = self.working_time / max(1, self.count_work)
+        efficiency = (avg_work_time) / (avg_work_time + avg_get_block_time + avg_put_block_time)
+        profile_str = f"Blocking Time Get/Work/Put = {_format_time(avg_get_block_time)}/{_format_time(avg_work_time)}/{_format_time(avg_put_block_time)} | "\
+                    f"Efficiency = {efficiency * 100:.1f}% | "\
+                    f"Counts = {self.output.count_put}"
+        return profile_str
+
+    def __repr__(self):
+        if self.work_fn is None:
+            return f"Worker(class={self.__class__.__name__})   {self.get_profile_str()}"
+        else:
+            return f"Worker(fn={self.work_fn.__name__})   {self.get_profile_str()}"
 
 
 class Source(ThreadingNode):
@@ -244,9 +294,15 @@ class Source(ThreadingNode):
         self.init()
         try:
             for data in self.provide():
-                _put_queue(self.output, data, self._terminate_flag)
-        except Terminate:
+                self.output.put(data)
+        except ShutDown:
             return
+
+    def __repr__(self):
+        if self.provide_fn is None:
+            return f"Source(class={self.__class__.__name__})   {self.get_profile_str()}"
+        else:
+            return f"Source(fn={self.provide_fn.__name__})   {self.get_profile_str()}"
 
 
 class Batch(ThreadingNode):
@@ -278,7 +334,7 @@ class Batch(ThreadingNode):
                             break
                     # Try to get an item within the remaining time
                     try:
-                        item = _get_queue(self.input, self._terminate_flag, timeout)
+                        item = self.input.get(timeout=timeout)
                     except Empty:
                         break
                     # If the item is EndOfInput, break the loop
@@ -290,13 +346,19 @@ class Batch(ThreadingNode):
                     batch.append(item)
 
                 if len(batch) > 0:
-                    _put_queue(self.output, batch, self._terminate_flag)
+                    self.output.put(batch)
 
                 if isinstance(item, EndOfInput):
-                    _put_queue(self.output, EndOfInput(), self._terminate_flag)
+                    self.output.put(EndOfInput())
                     continue
-        except Terminate:
+        except ShutDown:
             return
+
+    def __repr__(self):
+        if self.patience is None:
+            return f"Batch(size={self.batch_size})   {self.get_profile_str()}"
+        else:
+            return f"Batch(size={self.batch_size}, patience={self.patience})   {self.get_profile_str()}"
 
 
 class Unbatch(ThreadingNode):
@@ -310,16 +372,17 @@ class Unbatch(ThreadingNode):
     def loop(self):
         try:
             while True:
-                batch = _get_queue(self.input, self._terminate_flag)
-                
+                batch = self.input.get()
                 if isinstance(batch, EndOfInput):
-                    _put_queue(self.output, EndOfInput(), self._terminate_flag)
+                    self.output.put(EndOfInput())
                     continue
-                
                 for item in batch:
-                    _put_queue(self.output, item, self._terminate_flag)
-        except Terminate:
+                    self.output.put(item)
+        except ShutDown:
             return
+
+    def __repr__(self):
+        return "Unbatch()"
 
 
 class Buffer(ThreadingNode):
@@ -337,10 +400,13 @@ class Buffer(ThreadingNode):
     def loop(self):
         try:
             while True:
-                item = _get_queue(self.input, self._terminate_flag)
-                _put_queue(self.output, item, self._terminate_flag)
-        except Terminate:
+                item = self.input.get()
+                self.output.put(item)
+        except ShutDown:
             return
+
+    def __repr__(self):
+        return f"Buffer(size={self.size})   {self.get_profile_str()}"
 
 
 class Sequential(Node):
@@ -389,6 +455,9 @@ class Sequential(Node):
         for node in self.nodes:
             node.stop()
 
+    def __repr__(self):
+        return f"Sequential( {self.get_profile_str()}\n" + "\n".join([_add_indent(repr(node)) for node in self.nodes]) + "\n)"
+
 
 class Parallel(ThreadingNode):
     """
@@ -396,9 +465,12 @@ class Parallel(ThreadingNode):
     NOTE: It is FIFO if and only if all the nested nodes are FIFO.
     """
     nodes: List[Node]
+    working_nodes: Queue[Node]
+    idle_nodes: Queue[Node]
 
     def __init__(self, nodes_or_callable: Union[Callable, Sequence[Node]], num_duplicates: int = None):
         super().__init__()
+        self.num_duplicates = num_duplicates
         if isinstance(nodes_or_callable, Callable):
             assert num_duplicates is not None, "Duplicates count must be specified for callable"
             self.nodes = [Worker(nodes_or_callable) for _ in range(num_duplicates)]
@@ -424,21 +496,21 @@ class Parallel(ThreadingNode):
     def _in_thread_fn(self):
         try:
             while True:
-                item = _get_queue(self.input, self._terminate_flag)
-                node = _get_queue(self.idle_nodes, self._terminate_flag)
+                item = self.input.get()
+                node = self.idle_nodes.get()
                 self.working_nodes.put(node)
-                _put_queue(node.input, item, self._terminate_flag)
-        except Terminate:
+                node.input.put(item)
+        except ShutDown:
             return
     
     def _out_thread_fn(self):
         try:
             while True:
-                node = _get_queue(self.working_nodes, self._terminate_flag)
-                item = _get_queue(node.output, self._terminate_flag)
-                _put_queue(self.output, item, self._terminate_flag)
-                _put_queue(self.idle_nodes, node, self._terminate_flag)
-        except Terminate:
+                node = self.working_nodes.get()
+                item = node.output.get()
+                self.output.put(item)
+                self.idle_nodes.put(node)
+        except ShutDown:
             return
 
     def start(self):
@@ -446,15 +518,20 @@ class Parallel(ThreadingNode):
         for node in self.nodes:
             node.start()
     
-    def terminate(self):
-        super().terminate()
+    def shutdown(self):
+        super().shutdown()
+        self.working_nodes.shutdown()
+        self.idle_nodes.shutdown()
         for node in self.nodes:
-            node.terminate()
+            node.shutdown()
 
     def stop(self):
         super().stop()
         for node in self.nodes:
             node.stop()
+
+    def __repr__(self):
+        return f"Parallel(   {self.get_profile_str()}\n" + "\n".join([_add_indent(repr(node)) for node in self.nodes]) + "\n)"
 
 
 class Distribute(ThreadingNode):
@@ -479,29 +556,29 @@ class Distribute(ThreadingNode):
     def _in_thread_fn(self):
         try:
             while True:
-                item = _get_queue(self.input, self._terminate_flag)
+                item = self.input.get()
 
                 if isinstance(item, EndOfInput):
                     for node in self.branches.values():
-                        _put_queue(node.input, EndOfInput(), self._terminate_flag)
+                        node.input.put(EndOfInput())
                     continue
 
                 if any(k not in self.branches for k in item) or any(k not in item for k in self.branches):
                     raise ValueError(f"Distribute keys mismatch. Input keys: {list(item.keys())}. Required keys: {list(self.branches.keys())}.")
                 for k, v in item.items():
-                    _put_queue(self.branches[k].input, v, self._terminate_flag)
-        except Terminate:
+                    self.branches[k].input.put(v)
+        except ShutDown:
             return
 
     def _out_thread_fn(self):
         try:
             while True:
-                item = {k: _get_queue(node.output, self._terminate_flag) for k, node in self.branches.items()}
+                item = {k: node.output.get() for k, node in self.branches.items()}
                 if all(isinstance(v, EndOfInput) for v in item.values()):
-                    _put_queue(self.output, EndOfInput(), self._terminate_flag)
+                    self.output.put(EndOfInput())
                     continue
-                _put_queue(self.output, item, self._terminate_flag)
-        except Terminate:
+                self.output.put(item)
+        except ShutDown:
             return
 
     def start(self):
@@ -509,19 +586,23 @@ class Distribute(ThreadingNode):
             node.start()
         super().start()
 
-    def terminate(self):
+    def shutdown(self):
         for node in self.branches.values():
-            node.terminate()
-        super().terminate()  
+            node.shutdown()
+        super().shutdown()  
 
     def stop(self):
         for node in self.branches.values():
             node.stop()
         super().stop()
 
+    def __repr__(self):
+        return f"Distribute(  {self.get_profile_str()}\n" + "\n".join([_add_indent(f"\"{k}\": {repr(v)}") for k, v in self.branches.items()]) + "\n)"
+
 
 class Switch(ThreadingNode):
     branches: Dict[str, Node]
+    fifo_order: Queue[str]
 
     def __init__(self, predicate: Callable[[Any], str], branches: Dict[str, Node]):
         self.predicate = predicate
@@ -542,30 +623,28 @@ class Switch(ThreadingNode):
     def _in_thread_fn(self):
         try:
             while True:
-                item = _get_queue(self.input, self._terminate_flag)
-                
+                item = self.input.get()
                 if isinstance(item, EndOfInput):
-                    self.fifo_order.put(EndOfInput)
+                    self.fifo_order.put(EndOfInput())
                     continue
-                
                 key = self.predicate(item)
                 if key not in self.branches:
                     raise ValueError(f"Switch block key mismatches. \"{key}\" not in found in {list(self.branches.keys())}.")
-                _put_queue(self.branches[key].input, item, self._terminate_flag)
+                self.branches[key].input.put(item)
                 self.fifo_order.put(key)
-        except Terminate:
+        except ShutDown:
             return
 
     def _out_thread_fn(self):
         try:
             while True:
-                key = _get_queue(self.fifo_order, self._terminate_flag)
+                key = self.fifo_order.get()
                 if isinstance(key, EndOfInput):
-                    _put_queue(self.output, EndOfInput(), self._terminate_flag)
+                    self.output.put(EndOfInput())
                     continue
-                item = _get_queue(self.branches[key], self._terminate_flag)
-                _put_queue(self.output, item, self._terminate_flag)
-        except Terminate:
+                item = self.branches[key].output.get()
+                self.output.put(item)
+        except ShutDown:
             return
         
     def start(self):
@@ -573,19 +652,24 @@ class Switch(ThreadingNode):
         for node in self.branches.values():
             node.start()
 
-    def terminate(self):
-        super().terminate()
+    def shutdown(self):
+        super().shutdown()
+        self.fifo_order.shutdown()
         for node in self.branches.values():
-            node.terminate()
+            node.shutdown()
 
     def stop(self):
         super().stop()
         for node in self.branches.values():
             node.stop()
+
+    def __repr__(self):
+        return f"Switch(    {self.get_profile_str()}\n" + "\n".join([_add_indent(f"\"{k}\": {repr(v)}") for k, v in self.branches.items()]) + "\n)"
         
 
 class Router(ThreadingNode):
     branches: Dict[str, Node]
+    fifo_order: Queue[str]
 
     def __init__(self, predicate: Callable[[Any], List[str]], branches: Dict[str, Node]):
         self.predicate = predicate
@@ -601,12 +685,12 @@ class Router(ThreadingNode):
             else:
                 raise ValueError(f"Invalid node type: {type(node)}")
             self.branches[key] = node
-        self.fifo_order = Queue()
+        self.fifo_order = Queue(self)
 
     def _in_thread_fn(self):
         try:
             while True:
-                item = _get_queue(self.input, self._terminate_flag)
+                item = self.input.get()
                 
                 if isinstance(item, EndOfInput):
                     self.fifo_order.put(EndOfInput())
@@ -616,23 +700,29 @@ class Router(ThreadingNode):
                 if any(k not in self.branches for k in keys) or any(k not in keys for k in self.branches):
                     raise ValueError(f"Switch block key mismatches. Input keys: {list(keys)}. Expected keys: {list(self.branches.keys())}.")
                 for key in keys:
-                    _put_queue(self.branches[key].input, item, self._terminate_flag)
+                    self.branches[key].input.put(item)
                 self.fifo_order.put(keys)
-        except Terminate:
+        except ShutDown:
             return
 
     def _out_thread_fn(self):
         try:
             while True:
-                keys = _get_queue(self.fifo_order, self._terminate_flag)
+                keys = self.fifo_order.get()
                 if isinstance(keys, EndOfInput):
-                    _put_queue(self.output, EndOfInput(), self._terminate_flag)
+                    self.output.put(EndOfInput())
                     continue
-                item = {k: _get_queue(self.branches[k], self._terminate_flag) for k in keys}
-                _put_queue(self.output, item, self._terminate_flag)
-        except Terminate:
+                item = {k: self.branches[k].output.get() for k in keys}
+                self.output.put(item)
+        except ShutDown:
             return
-        
+    
+    def shutdown(self):
+        super().shutdown()
+        self.fifo_order.shutdown()
+        for node in self.branches.values():
+            node.shutdown()
+
     def start(self):
         super().start()
         for node in self.branches.values():
@@ -642,6 +732,9 @@ class Router(ThreadingNode):
         super().stop()
         for node in self.branches.values():
             node.stop()
+    
+    def __repr__(self):
+        return f"Router(    {self.get_profile_str()}\n" + "\n".join([_add_indent(f"\"{k}\": {repr(v)}") for k, v in self.branches.items()]) + "\n)"
         
 
 class Broadcast(ThreadingNode):
@@ -679,31 +772,31 @@ class Broadcast(ThreadingNode):
     def _in_thread_fn(self):
         try:
             while True:
-                item = _get_queue(self.input, self._terminate_flag)
+                item = self.input.get()
                 if isinstance(self.branches, list):
                     for node in self.branches:
-                        _put_queue(node.input, item, self._terminate_flag)
+                        node.input.put(item)
                 else:
                     for key, node in self.branches.items():
-                        _put_queue(node.input, item, self._terminate_flag)
-        except Terminate:
+                        node.input.put(item)
+        except ShutDown:
             return
 
     def _out_thread_fn(self):
         try:
             while True:
                 if isinstance(self.branches, list):
-                    item = [_get_queue(node.output, item, self._terminate_flag) for node in self.branches]
+                    item = [node.output.get() for node in self.branches]
                 else:
-                    item = {k: _get_queue(node.output, self._terminate_flag) for k, node in self.branches.items()}
-                
+                    item = {k: node.output.get() for k, node in self.branches.items()}
+
                 if (isinstance(self.branches, list) and all(isinstance(v, EndOfInput) for v in item)) \
                     or (isinstance(self.branches, dict) and all(isinstance(v, EndOfInput) for v in item.values())):
-                    _put_queue(self.output, EndOfInput(), self._terminate_flag)
+                    self.output.put(EndOfInput())
                     continue
-                
-                _put_queue(self.output, item, self._terminate_flag)
-        except Terminate:
+
+                self.output.put(item)
+        except ShutDown:
             return
         
     def start(self):
@@ -715,7 +808,13 @@ class Broadcast(ThreadingNode):
         super().stop()
         for node in self.branches.values():
             node.stop()
-        
+    
+    def __repr__(self):
+        if isinstance(self.branches, list):
+            return f"Broadcast(    {self.get_profile_str()}\n" + "\n".join(_add_indent(repr(v)) for v in self.branches) + "\n)"
+        else:
+            return f"Broadcast(    {self.get_profile_str()}\n" + "\n".join(_add_indent(f"\"{k}\": {repr(v)}") for k, v in self.branches.items()) + "\n)"
+
 
 class Filter(ThreadingNode):
     """
@@ -724,7 +823,8 @@ class Filter(ThreadingNode):
     """
     def __init__(self, predicate: Optional[Callable[[Any], bool]] = None):
         """
-        ### Parameters
+        Parameters
+        ---
         - `predicate`: A function that takes an item and returns True if the item should be passed to the output queue. Default to pass items that are not None.
         """
         super().__init__()
@@ -734,11 +834,17 @@ class Filter(ThreadingNode):
     def loop(self):
         try:
             while True:
-                item = _get_queue(self.input, self._terminate_flag)
+                item = self.input.get()
                 if isinstance(item, EndOfInput):
-                    _put_queue(self.output, EndOfInput(), self._terminate_flag)
+                    self.output.put(EndOfInput())
                     continue
                 if (self.predicate is None and item is not None) or (self.predicate is not None and self.predicate(item)):
-                    _put_queue(self.output, item, self._terminate_flag)
-        except Terminate:
+                    self.output.put(item)
+        except ShutDown:
             return
+
+    def __repr__(self):
+        if self.predicate is None:
+            return "Filter()    {self.get_profile_str()}"
+        else:
+            return f"Filter   {self.get_profile_str()}(fn={self.predicate.__name__})"
