@@ -40,15 +40,25 @@ class EndOfInput:
 _PROFILE_FORMATTER = {
     'Starvation': lambda x: f"{x * 100:.1f} %",
     'Backpressure': lambda x: f"{x * 100:.1f} %",
-    'Working': lambda x: f"{x * 100:.1f} %",
-    'Throughput/In': format_throughput,
-    'Throughput/Out': format_throughput,
-    'Count/In': str,
-    'Count/Out': str,
-    'Count/Work': str,
-    'Efficiency': lambda x: f"{x * 100:.1f} %"
+    'Efficiency': lambda x: f"{x * 100:.1f} %",
+    'Overload': lambda x: f"{x * 100:.1f} %",
+    'In-Throughput': format_throughput,
+    'Out-Throughput': format_throughput,
+    'In-Count': str,
+    'Out-Count': str
 }
 
+_PROFILE_COLUMNS = [
+    'Node',
+    'Starvation',
+    'Overload',
+    'Backpressure',
+    'Efficiency',
+    'In-Throughput',
+    'Out-Throughput',
+    'In-Count',
+    'Out-Count'
+]
 
 class ProfiledQueue(Queue):
     """A Queue that records the get/put block time for profiling purposes."""
@@ -186,11 +196,12 @@ class Node:
         running_time = time.perf_counter() - self.start_time
         profile = {
             "Starvation": self.input.total_get_block_time / running_time,
+            "Overload": self.input.total_put_block_time / running_time,
             "Backpressure": self.output.total_put_block_time / running_time,
-            "Throughput/In": self.input.count_get / running_time,
-            "Throughput/Out": self.output.count_put / running_time,
-            "Count/In": self.input.count_get,
-            "Count/Out": self.output.count_put,
+            "In-Throughput": self.input.count_get / running_time,
+            "Out-Throughput": self.output.count_put / running_time,
+            "In-Count": self.input.count_get,
+            "Out-Count": self.output.count_put,
         }
         return profile
 
@@ -215,7 +226,7 @@ class Node:
                 "Node": node_tree_name,
                 **node._profile_single()
             })
-        return format_table(profiles, sep=" | ", sort_keys=False, fill='-', formatter=_PROFILE_FORMATTER)
+        return format_table(profiles, sep=" | ", fill='-', formatter=_PROFILE_FORMATTER, columns=_PROFILE_COLUMNS)
 
     def format_tree(self) -> List[str]:
         if not hasattr(self, 'nodes'):
@@ -326,8 +337,6 @@ class Worker(ThreadingNode):
         profile = super()._profile_single()
         running_time = time.perf_counter() - self.start_time
         profile.update({
-            "Working": self.working_time / running_time,
-            "Count/Work": self.count_work,
             "Efficiency": self.working_time / running_time
         })
         return profile

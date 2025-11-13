@@ -20,35 +20,44 @@ def format_throughput(it_per_sec: float) -> str:
         return f"{it_per_sec:.2f} it/s"
 
 
-def format_table(data: List[dict], sep: str = " | ", fill: str = "-", sort_keys=False, formatter: Optional[Union[Callable[[Any], str], Dict[str, Callable[[Any], str]]]] = str) -> str:
+def format_table(
+    data: List[dict], 
+    sep: str = " | ", 
+    fill: str = "-", 
+    formatter: Optional[Union[Callable[[Any], str], Dict[str, Callable[[Any], str]]]] = str, 
+    columns: Optional[List[str]] = None
+) -> str:
     if not data:
         print("(empty)")
         return
     if callable(formatter):
         formatter = {k: formatter for k in data[0].keys()}
-    if sort_keys:
-        keys = sorted({k for d in data for k in d})
-    else:
-        keys = []
+    if columns is None:
+        columns = []
         for d in data:
             for k in d.keys():
-                if k not in keys:
-                    keys.append(k)
-    data = [{k: formatter.get(k, str)(d[k]) if k in d else fill for k in keys} for d in data]
+                if k not in columns:
+                    columns.append(k)
+    data = [{k: formatter.get(k, str)(d[k]) if k in d else fill for k in columns} for d in data]
     widths = {
         k: max(len(str(k)), *(len(row.get(k, fill)) for row in data))
-        for k in keys
+        for k in columns
     }
-    header = sep.join(f"{k:{widths[k]}}" for k in keys)
+    header = sep.join(f"{k:{widths[k]}}" for k in columns)
     lines = []
     lines.append(header)
     lines.append("-" * len(header))
     for row in data:
-        line = sep.join(f"{row.get(k, fill):{widths[k]}}" for k in keys)
+        line = sep.join(f"{row.get(k, fill):{widths[k]}}" for k in columns)
         lines.append(line)
     return "\n".join(lines)
 
 
-def print_table(data: List[dict], sep=" | ", fill="-", sort_keys=False, formatter: Optional[Union[Callable[[Any], str], Dict[str, Callable[[Any], str]]]] = str):
-    table_str = format_table(data, sep=sep, fill=fill, sort_keys=sort_keys, formatter=formatter)
+def print_table(
+    data: List[dict], sep=" | ", 
+    fill="-", 
+    formatter: Optional[Union[Callable[[Any], str], Dict[str, Callable[[Any], str]]]] = str,
+    columns: Optional[List[str]] = None,
+) -> None:
+    table_str = format_table(data, sep=sep, fill=fill, formatter=formatter, columns=columns)
     print(table_str)

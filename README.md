@@ -70,15 +70,15 @@ print(pipe.profile_str())
 ```
 
 ```text
-Node                        | Starvation | Backpressure | Throughput/In | Throughput/Out | Count/In | Count/Out | Working | Count/Work | Efficiency
----------------------------------------------------------------------------------------------------------------------------------------------------
-Sequential                  | 0.0 %      | 0.0 %        | 1.67 it/s     | 1.20 s/it      | 10       | 5         | -       | -          | -         
-├─0 Worker(fn=slow_add)     | 0.0 %      | 0.0 %        | 1.67 it/s     | 1.67 it/s      | 10       | 10        | 88.4 %  | 10         | 88.4 %    
-├─1 Parallel                | 88.5 %     | 0.0 %        | 1.67 it/s     | 1.67 it/s      | 10       | 10        | -       | -          | -         
-│   ├─0 Worker(fn=slow_mul) | 56.8 %     | 0.0 %        | 1.49 s/it     | 1.49 s/it      | 4        | 4         | 43.1 %  | 4          | 43.1 %    
-│   ├─1 Worker(fn=slow_mul) | 64.7 %     | 0.0 %        | 1.99 s/it     | 1.99 s/it      | 3        | 3         | 28.2 %  | 3          | 28.2 %    
-│   └─2 Worker(fn=slow_mul) | 54.9 %     | 0.0 %        | 1.99 s/it     | 1.99 s/it      | 3        | 3         | 39.3 %  | 3          | 39.3 %    
-└─2 Filter                  | 100.0 %    | 0.0 %        | 1.67 it/s     | 1.19 s/it      | 10       | 5         | -       | -          | -         
+Node                        | Starvation | Overload | Backpressure | Efficiency | In-Throughput | Out-Throughput | In-Count | Out-Count
+---------------------------------------------------------------------------------------------------------------------------------------
+Sequential                  | 0.0 %      | 66.5 %   | 0.0 %        | -          | 2.47 it/s     | 1.23 it/s      | 10       | 5        
+├─0 Worker(fn=slow_add)     | 0.0 %      | 66.5 %   | 0.0 %        | 87.4 %     | 2.47 it/s     | 2.47 it/s      | 10       | 10       
+├─1 Parallel                | 85.0 %     | 0.0 %    | 0.0 %        | -          | 2.47 it/s     | 2.47 it/s      | 10       | 10       
+│   ├─0 Worker(fn=slow_mul) | 54.8 %     | 0.0 %    | 0.0 %        | 45.1 %     | 1.01 s/it     | 1.01 s/it      | 4        | 4        
+│   ├─1 Worker(fn=slow_mul) | 35.0 %     | 0.0 %    | 0.0 %        | 38.0 %     | 1.35 s/it     | 1.35 s/it      | 3        | 3        
+│   └─2 Worker(fn=slow_mul) | 71.4 %     | 0.0 %    | 0.0 %        | 22.6 %     | 1.35 s/it     | 1.35 s/it      | 3        | 3        
+└─2 Filter                  | 100.0 %    | 0.0 %    | 0.0 %        | -          | 2.47 it/s     | 1.23 it/s      | 10       | 5          
 ```
 
 
