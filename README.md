@@ -1,12 +1,11 @@
 # Pipeline
 
-Multithread python pipeline framework.
+A multithreaded Python framework for building concurrent data pipelines.
 
-* Preserving first-in-first-out order of data.
-* Supporting complex and non-linear data flow.
-* Maximizing thouroughput. 
-* Easy and intuitive. Minimal code to build a pipeline. 
-* Suitable for IO-bound and numpy/pytorch-based applications with complex streamed data.
+* **Minimal code and intuitive usage**.
+* **Targets to I/O and NumPy/PyTorch data workloads**.
+* **Handles complex, branched pipelines**.
+* **Guarantees FIFO data order**.
 
 ## Installation
 
@@ -14,7 +13,78 @@ Multithread python pipeline framework.
 pip install git+https://github.com/EasternJournalist/pipeline.git
 ```
 
-## Supported Components
+
+## Usage
+
+### Quick Start
+
+Let's build a simple pipeline that performs the following operations:
+- Adds 1 to each input number.
+- Multiplies the result by 3 (slowly). To make it *faster*, use 3 parallel workers for this step.
+- Filters out odd results, keeping only even numbers.
+
+
+```python
+import pipeline
+import time
+import random
+
+# Example functions
+def slow_add(x):
+    time.sleep(random.random()) # <= some slow computation
+    return x + 1
+
+def slow_mul(x):
+    time.sleep(random.random()) # <= some slow computation
+    return x * 3
+
+# Building the pipeline
+pipe = pipeline.Sequential([
+    slow_add,
+    pipeline.Parallel(slow_mul, num_duplicates=3), 
+    pipeline.Filter(lambda x: x % 2 == 0)
+])
+print(pipe)
+# Sequential
+# ├─0 Worker(fn=slow_add)
+# ├─1 Parallel
+# │   ├─0 Worker(fn=slow_mul)
+# │   ├─1 Worker(fn=slow_mul)
+# │   └─2 Worker(fn=slow_mul)
+# └─2 Filter(fn=<lambda>)
+
+# Start the pipeline
+with pipe:  
+    data = range(10)              # Pass an iterable of data
+    for result in pipe(data):     # Iterate over processed results
+        print(f"Result: {result}")
+```
+
+### Profiling Performance
+
+The pipeline provides built-in profiling of blocking time and throughput. 
+
+```python
+... # After running the pipeline, or at any time
+print(pipe.profile_str())
+```
+
+```text
+Node                        | Starvation | Backpressure | Throughput/In | Throughput/Out | Count/In | Count/Out | Working | Count/Work | Efficiency
+---------------------------------------------------------------------------------------------------------------------------------------------------
+Sequential                  | 0.0 %      | 0.0 %        | 1.67 it/s     | 1.20 s/it      | 10       | 5         | -       | -          | -         
+├─0 Worker(fn=slow_add)     | 0.0 %      | 0.0 %        | 1.67 it/s     | 1.67 it/s      | 10       | 10        | 88.4 %  | 10         | 88.4 %    
+├─1 Parallel                | 88.5 %     | 0.0 %        | 1.67 it/s     | 1.67 it/s      | 10       | 10        | -       | -          | -         
+│   ├─0 Worker(fn=slow_mul) | 56.8 %     | 0.0 %        | 1.49 s/it     | 1.49 s/it      | 4        | 4         | 43.1 %  | 4          | 43.1 %    
+│   ├─1 Worker(fn=slow_mul) | 64.7 %     | 0.0 %        | 1.99 s/it     | 1.99 s/it      | 3        | 3         | 28.2 %  | 3          | 28.2 %    
+│   └─2 Worker(fn=slow_mul) | 54.9 %     | 0.0 %        | 1.99 s/it     | 1.99 s/it      | 3        | 3         | 39.3 %  | 3          | 39.3 %    
+└─2 Filter                  | 100.0 %    | 0.0 %        | 1.67 it/s     | 1.19 s/it      | 10       | 5         | -       | -          | -         
+```
+
+
+### Available Components
+
+Beyond `Parallel` and `Sequential`, the following components are available for flow control, multi-branch routing, buffering, and batching:
 
 <table>
   <thead>
@@ -83,106 +153,3 @@ pip install git+https://github.com/EasternJournalist/pipeline.git
     </tr>
   </tbody>
 </table>
-
-
-## Example
-
-```mermaid
-graph TD
-    A["**A** (30ms)"] --> B_in
-    
-    subgraph Parallel Worker Pool
-      B_in((Pool)) --> B1["**B1** (150ms)"] & B2["**B2** (150ms)"] & B3["**B3** (150ms)"] --> B_out((Pool))
-    end
-    B_out --> C_in
-
-    subgraph Distributed Block **C**
-      C_in[/Split\]
-      C_out[\Merge/]
-      C_in -->|x| CX["**CX** (40ms)"] --> C_out
-      C_in -->|y| CY_in 
-      
-      subgraph Parallel Worker Pool **CY**
-        CY_in((Pool)) --> CY1["**CY1** (120ms)"] & CY2["**CY2** (120ms)"] & CY3["**CY3** (120ms)"] --> CY_out((Pool))
-      end
-      CY_out --> C_out
-    end
-    C_out --> D["**D** (40ms)"]
-```
-
-- If processing serially, each item takes 30 + 150 + 40 + 120 + 40 = 380ms.  
-- With pipeline, we can achieve the **theoretical optimal throughput of 50ms per item**.
-
-```python
-import pipeline
-
-pipe = pipeline.Sequential([ 
-    A, 
-    pipeline.Parallel([B, B, B]),
-    pipeline.Distribute({
-      'x': CX, 
-      'y': pipeline.Parallel([CY, CY, CY]), 
-    }),  .
-    D,
-])
-```
-
-Test the full example code below:
-
-```python
-import time
-import pipeline
-
-# Define the functions of each node
-def A(data):
-    time.sleep(0.03)
-    return data * 4 - 3
-
-def B(data):
-    time.sleep(0.15)
-    return {'x': data * 2, 'y': 1}
-
-def CX(data):
-    time.sleep(0.04)
-    return data ** 2
-
-def CY(data):
-    time.sleep(0.12)
-    return data - 1
-
-def D(data):
-    time.sleep(0.05)
-    return data['x'] + data['y']
-
-
-# Build the pipeline
-pipe = pipeline.Sequential([ 
-    A, 
-    pipeline.Parallel([B, B, B]),
-    pipeline.Distribute({
-      'x': CX, 
-      'y': pipeline.Parallel([CY, CY, CY]), 
-    }),
-    D,
-])
-
-# Start the pipeline and run it
-with pipe:  
-    
-    last_time = time.time()
-    # Pass an iterable input to the pipeline and iterate over the results
-    for i, result in enumerate(pipe(range(100))):
-        now = time.time()
-        print(f"No. {i}, result: {result}, throughput: {now - last_time:.4f}s/it.")
-        last_time = now
-
-    # Usage 2 - For irregularlly sourced data
-    pipe.put(10)
-    print(pipe.get())
-
-    # NOTE for usage 2: 
-    # If you put too many data and do not get them, 
-    # the pipeline will be full, and the put operation will block until the pipeline has space to accept the data.
-    # Consider putting data in a separate thread.
-    # Or use a Buffer(0) node at the beginning of the sequential to hold infinite number of inputs.
-```

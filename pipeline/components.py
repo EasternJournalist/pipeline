@@ -1,6 +1,4 @@
 from typing import *
-from .queue import Empty, Full, ShutDown
-from .queue import Queue
 from threading import Thread, Event
 import threading
 import inspect
@@ -8,8 +6,13 @@ import time
 import random
 import itertools
 import functools
+from .queue import Empty, Full, ShutDown
+from .queue import Queue
+from .utils import format_time, format_throughput, format_table
+
 
 __all__ = [
+    'Node',
     'Worker', 
     'Source',
     'Batch',
@@ -28,24 +31,23 @@ __all__ = [
 DEFAULT_QUEUE_SIZE = 1
 
 
-def _add_indent(s: str, num_spaces: int = 4) -> str:
-    indent = ' ' * num_spaces
-    return indent + s.replace('\n', '\n' + indent)
 
-def _format_time(seconds: float) -> str:
-    if seconds < 1e-3:
-        return f"{seconds * 1e6:.2f}µs"
-    elif seconds < 1:
-        return f"{seconds * 1e3:.2f}ms"
-    elif seconds < 60:
-        return f"{seconds:.2f}s"
-    elif seconds < 3600:
-        return f"{seconds / 60:.2f}min"
-    else:
-        return f"{seconds / 3600:.2f}h"
-    
 class EndOfInput:
     pass
+
+
+
+_PROFILE_FORMATTER = {
+    'Starvation': lambda x: f"{x * 100:.1f} %",
+    'Backpressure': lambda x: f"{x * 100:.1f} %",
+    'Working': lambda x: f"{x * 100:.1f} %",
+    'Throughput/In': format_throughput,
+    'Throughput/Out': format_throughput,
+    'Count/In': str,
+    'Count/Out': str,
+    'Count/Work': str,
+    'Efficiency': lambda x: f"{x * 100:.1f} %"
+}
 
 
 class ProfiledQueue(Queue):
@@ -80,7 +82,11 @@ class ProfiledQueue(Queue):
 
 
 class Node:
-    def __init__(self):
+    nodes: Union[List['Node'], Dict[str, 'Node']]
+    """Child nodes"""
+
+    def __init__(self, name: str = None):
+        self._name = name
         self._in_queue_lock = threading.Lock()
         self._out_queue_lock = threading.Lock()
         self._input = None
@@ -88,6 +94,20 @@ class Node:
         self._is_started = False
         self._is_shutdown = False
 
+    @property
+    def name(self) -> str:
+        if self._name is not None:
+            return self._name
+        else:
+            return self._default_name()
+    
+    @name.setter
+    def name(self, value: str):
+        self._name = value
+
+    def _default_name(self):
+        return f"{self.__class__.__name__}"
+    
     @property
     def input(self) -> ProfiledQueue:
         with self._in_queue_lock:
@@ -119,6 +139,7 @@ class Node:
     def start(self):
         "Start the node."
         self._is_started = True
+        self.start_time = time.perf_counter()
 
     def shutdown(self):
         "Send shutdown signal without waiting for threads/processes to finish. NOTE: Once shutdown is called, the node cannot be restarted."
@@ -159,17 +180,64 @@ class Node:
         assert self._is_started, "Node is not started."
         return NodeIterator(self, iterator)
 
-    def get_profile_str(self) -> str:
+    def _profile_single(self) -> Dict[str, str]:
         if not self._is_started:
-            return "Not started"
-        avg_put_block_time = self.input.total_put_block_time / max(1, self.input.count_put)
-        avg_get_block_time = self.output.total_get_block_time / max(1, self.output.count_get)
-        profile_str = f"Blocking Time Get/Put = {_format_time(avg_get_block_time)}/{_format_time(avg_put_block_time)}"\
-                        f" | Count Get/Put = {self.output.count_get}/{self.input.count_put}"
-        return profile_str
+            return {}
+        running_time = time.perf_counter() - self.start_time
+        profile = {
+            "Starvation": self.input.total_get_block_time / running_time,
+            "Backpressure": self.output.total_put_block_time / running_time,
+            "Throughput/In": self.input.count_get / running_time,
+            "Throughput/Out": self.output.count_put / running_time,
+            "Count/In": self.input.count_get,
+            "Count/Out": self.output.count_put,
+        }
+        return profile
+
+    def iterate_tree(self, parents: Tuple['Node', ...] = None) -> Iterable[Tuple[Tuple[Tuple['Node', str], ...], 'Node']]:
+        if parents is None:
+            parents = tuple()
+        yield parents, self
+        if hasattr(self, 'nodes'):
+            for key, node in self.nodes.items() if isinstance(self.nodes, dict) else enumerate(self.nodes):
+                yield from node.iterate_tree(parents + ((self, key),))
+
+    def profile(self) -> Dict[Tuple[Tuple[Tuple['Node', str], ...], 'Node'], Dict[str, float]]:
+        profiles = {}
+        for (parents, node) in self.iterate_tree():
+            profiles[(parents, node)] = node._profile_single()
+        return profiles
+
+    def profile_str(self) -> str:
+        profiles = []
+        for node_tree_name, (_, node) in zip(self.format_tree(), self.iterate_tree()):
+            profiles.append({
+                "Node": node_tree_name,
+                **node._profile_single()
+            })
+        return format_table(profiles, sep=" | ", sort_keys=False, fill='-', formatter=_PROFILE_FORMATTER)
+
+    def format_tree(self) -> List[str]:
+        if not hasattr(self, 'nodes'):
+            return [self.name]
+        elif isinstance(self.nodes, (dict, list)):
+            lines = [self.name]
+            for i, (key, node) in enumerate(self.nodes.items() if isinstance(self.nodes, dict) else enumerate(self.nodes)):
+                key = str(key)
+                child_tree = node.format_tree()
+                indent = len(key) + 2
+                for j, line in enumerate(child_tree):
+                    right = "└" if i == len(self.nodes) - 1 else "├"
+                    down = "│"
+                    if j == 0:
+                        lines.append(f"{right}─{key} {line}")
+                    else:
+                        lines.append(down + ' ' * indent + line)
+            return lines
 
     def __repr__(self):
-        return f"Node(class={self.__class__.__name__})   {self.get_profile_str()}"
+        tree_lines = self.format_tree()
+        return '\n'.join(tree_lines)
 
 
 class NodeIterator:
@@ -214,8 +282,8 @@ class ThreadingNode(Node):
 
 
 class Worker(ThreadingNode):
-    def __init__(self, work: Callable = None):
-        super().__init__()
+    def __init__(self, work: Callable = None, name: str = None):
+        super().__init__(name=name)
         self.work_fn = work
         self.thread_functions = [self.loop]
         self.working_time = 0.0
@@ -252,31 +320,31 @@ class Worker(ThreadingNode):
         except ShutDown:
             return
 
-    def get_profile_str(self) -> str:
+    def _profile_single(self) -> Dict[str, str]:
         if not self._is_started:
-            return "Not started."
-        avg_put_block_time = self.input.total_put_block_time / max(1, self.input.count_put)
-        avg_get_block_time = self.output.total_get_block_time / max(1, self.output.count_get)
-        avg_work_time = self.working_time / max(1, self.count_work)
-        efficiency = (avg_work_time) / (avg_work_time + avg_get_block_time + avg_put_block_time)
-        profile_str = f"Blocking Time Get/Work/Put = {_format_time(avg_get_block_time)}/{_format_time(avg_work_time)}/{_format_time(avg_put_block_time)} | "\
-                    f"Efficiency = {efficiency * 100:.1f}% | "\
-                    f"Counts = {self.output.count_put}"
-        return profile_str
-
-    def __repr__(self):
+            return {}
+        profile = super()._profile_single()
+        running_time = time.perf_counter() - self.start_time
+        profile.update({
+            "Working": self.working_time / running_time,
+            "Count/Work": self.count_work,
+            "Efficiency": self.working_time / running_time
+        })
+        return profile
+    
+    def _default_name(self):
         if self.work_fn is None:
-            return f"Worker(class={self.__class__.__name__})   {self.get_profile_str()}"
+            return f"Worker(class={self.__class__.__name__})"
         else:
-            return f"Worker(fn={self.work_fn.__name__})   {self.get_profile_str()}"
+            return f"Worker(fn={self.work_fn.__name__})"
 
 
 class Source(ThreadingNode):
     """
     A node that provides data to successive nodes. It takes no input and provides data to the output queue.
     """
-    def __init__(self, provide: Callable = None):
-        super().__init__()
+    def __init__(self, provide: Callable = None, name: str = None):
+        super().__init__(name=name)
         self.provide_fn = provide
         self.thread_functions = [self.loop]
 
@@ -298,11 +366,11 @@ class Source(ThreadingNode):
         except ShutDown:
             return
 
-    def __repr__(self):
+    def _default_name(self):
         if self.provide_fn is None:
-            return f"Source(class={self.__class__.__name__})   {self.get_profile_str()}"
+            return f"Source(class={self.__class__.__name__})"
         else:
-            return f"Source(fn={self.provide_fn.__name__})   {self.get_profile_str()}"
+            return f"Source(fn={self.provide_fn.__name__})"
 
 
 class Batch(ThreadingNode):
@@ -311,9 +379,15 @@ class Batch(ThreadingNode):
     The `patience` parameter specifies the maximum time to wait for a batch to be filled before sending it to the next node,
     i.e., when the earliest item in the batch is out of `patience` seconds, the batch is sent regardless of its size.
     """
-    def __init__(self, batch_size: int, patience: float = None):
+    def __init__(self, batch_size: int, patience: float = None, name: Optional[str] = None):
+        """
+        Parameters
+        ---
+        - `batch_size`: The size of each batch.
+        - `patience`: Maximum time to wait for a batch to be filled before sending it to the next node. Default to None (wait indefinitely).
+        """
         assert batch_size > 0, "Batch size must be greater than 0."
-        super().__init__()
+        super().__init__(name=name)
         self.batch_size = batch_size
         self.patience = patience
         self.thread_functions = [self.loop]
@@ -354,19 +428,19 @@ class Batch(ThreadingNode):
         except ShutDown:
             return
 
-    def __repr__(self):
+    def _default_name(self):
         if self.patience is None:
-            return f"Batch(size={self.batch_size})   {self.get_profile_str()}"
+            return f"Batch(size={self.batch_size})"
         else:
-            return f"Batch(size={self.batch_size}, patience={self.patience})   {self.get_profile_str()}"
+            return f"Batch(size={self.batch_size}, patience={self.patience})"
 
 
 class Unbatch(ThreadingNode):
     """
     Ungroups every batch (a list of items) into individual items and passes them to successive nodes.
     """
-    def __init__(self):
-        super().__init__()
+    def __init__(self, name: Optional[str] = None):
+        super().__init__(name=name)
         self.thread_functions = [self.loop]
 
     def loop(self):
@@ -381,13 +455,10 @@ class Unbatch(ThreadingNode):
         except ShutDown:
             return
 
-    def __repr__(self):
-        return "Unbatch()"
-
 
 class Buffer(ThreadingNode):
-    def __init__(self, size: int):
-        super().__init__()
+    def __init__(self, size: int, name: Optional[str] = None):
+        super().__init__(name=name)
         self.size = size
         self.thread_functions = [self.loop]
     
@@ -405,9 +476,44 @@ class Buffer(ThreadingNode):
         except ShutDown:
             return
 
-    def __repr__(self):
-        return f"Buffer(size={self.size})   {self.get_profile_str()}"
+    def _default_name(self):
+        return f"Buffer(size={self.size})"
 
+
+
+class Filter(ThreadingNode):
+    """
+    A node that filters items based on a predicate function. 
+    If the predicate returns True, the item is passed to the output queue, otherwise it is discarded.
+    """
+    def __init__(self, predicate: Optional[Callable[[Any], bool]] = None, name: Optional[str] = None):
+        """
+        Parameters
+        ---
+        - `predicate`: A function that takes an item and returns True if the item should be passed to the output queue. Default to pass items that are not None.
+        """
+        super().__init__(name=name)
+        self.predicate = predicate
+        self.thread_functions = [self.loop]
+
+    def loop(self):
+        try:
+            while True:
+                item = self.input.get()
+                if isinstance(item, EndOfInput):
+                    self.output.put(EndOfInput())
+                    continue
+                if (self.predicate is None and item is not None) or (self.predicate is not None and self.predicate(item)):
+                    self.output.put(item)
+        except ShutDown:
+            return
+
+    def __repr__(self):
+        if self.predicate is None:
+            return f"Filter()"
+        else:
+            return f"Filter(fn={self.predicate.__name__})"
+        
 
 class Sequential(Node):
     """
@@ -415,8 +521,8 @@ class Sequential(Node):
     The order of input and output items is preserved (FIFO)
     """
     nodes: List[Node]
-    def __init__(self, nodes: List[Union[Node, Callable]]):
-        super().__init__()
+    def __init__(self, nodes: List[Union[Node, Callable]], name: Optional[str] = None):
+        super().__init__(name=name)
         self.nodes = []
         for node in nodes:
             if isinstance(node, Node):
@@ -455,9 +561,6 @@ class Sequential(Node):
         for node in self.nodes:
             node.stop()
 
-    def __repr__(self):
-        return f"Sequential( {self.get_profile_str()}\n" + "\n".join([_add_indent(repr(node)) for node in self.nodes]) + "\n)"
-
 
 class Parallel(ThreadingNode):
     """
@@ -468,8 +571,8 @@ class Parallel(ThreadingNode):
     working_nodes: Queue[Node]
     idle_nodes: Queue[Node]
 
-    def __init__(self, nodes_or_callable: Union[Callable, Sequence[Node]], num_duplicates: int = None):
-        super().__init__()
+    def __init__(self, nodes_or_callable: Union[Callable, Sequence[Union[Node, Callable]]], num_duplicates: int = None, name: Optional[str] = None):
+        super().__init__(name=name)
         self.num_duplicates = num_duplicates
         if isinstance(nodes_or_callable, Callable):
             assert num_duplicates is not None, "Duplicates count must be specified for callable"
@@ -530,17 +633,14 @@ class Parallel(ThreadingNode):
         for node in self.nodes:
             node.stop()
 
-    def __repr__(self):
-        return f"Parallel(   {self.get_profile_str()}\n" + "\n".join([_add_indent(repr(node)) for node in self.nodes]) + "\n)"
-
 
 class Distribute(ThreadingNode):
-    branches: Dict[str, Node]
+    nodes: Dict[str, Node]
 
-    def __init__(self, branches: Dict[str, Node]):
-        super().__init__()
-        self.branches = {}
-        for key, node in branches.items():
+    def __init__(self, nodes: Dict[str, Node], name: Optional[str] = None):
+        super().__init__(name=name)
+        self.nodes = {}
+        for key, node in nodes.items():
             if isinstance(node, Node):
                 pass
             elif isinstance(node, Callable):
@@ -550,7 +650,7 @@ class Distribute(ThreadingNode):
                     node = Worker(node)
             else:
                 raise ValueError(f"Invalid node type: {type(node)}")
-            self.branches[key] = node
+            self.nodes[key] = node
         self.thread_functions = [self._in_thread_fn] + [self._out_thread_fn]
     
     def _in_thread_fn(self):
@@ -559,21 +659,21 @@ class Distribute(ThreadingNode):
                 item = self.input.get()
 
                 if isinstance(item, EndOfInput):
-                    for node in self.branches.values():
+                    for node in self.nodes.values():
                         node.input.put(EndOfInput())
                     continue
 
-                if any(k not in self.branches for k in item) or any(k not in item for k in self.branches):
-                    raise ValueError(f"Distribute keys mismatch. Input keys: {list(item.keys())}. Required keys: {list(self.branches.keys())}.")
+                if any(k not in self.nodes for k in item) or any(k not in item for k in self.nodes):
+                    raise ValueError(f"Distribute keys mismatch. Input keys: {list(item.keys())}. Required keys: {list(self.nodes.keys())}.")
                 for k, v in item.items():
-                    self.branches[k].input.put(v)
+                    self.nodes[k].input.put(v)
         except ShutDown:
             return
 
     def _out_thread_fn(self):
         try:
             while True:
-                item = {k: node.output.get() for k, node in self.branches.items()}
+                item = {k: node.output.get() for k, node in self.nodes.items()}
                 if all(isinstance(v, EndOfInput) for v in item.values()):
                     self.output.put(EndOfInput())
                     continue
@@ -582,32 +682,30 @@ class Distribute(ThreadingNode):
             return
 
     def start(self):
-        for node in self.branches.values():
+        for node in self.nodes.values():
             node.start()
         super().start()
 
     def shutdown(self):
-        for node in self.branches.values():
+        for node in self.nodes.values():
             node.shutdown()
         super().shutdown()  
 
     def stop(self):
-        for node in self.branches.values():
+        for node in self.nodes.values():
             node.stop()
         super().stop()
 
-    def __repr__(self):
-        return f"Distribute(  {self.get_profile_str()}\n" + "\n".join([_add_indent(f"\"{k}\": {repr(v)}") for k, v in self.branches.items()]) + "\n)"
-
 
 class Switch(ThreadingNode):
-    branches: Dict[str, Node]
+    nodes: Dict[str, Node]
     fifo_order: Queue[str]
 
-    def __init__(self, predicate: Callable[[Any], str], branches: Dict[str, Node]):
+    def __init__(self, predicate: Callable[[Any], str], nodes: Dict[str, Node], name: Optional[str] = None):
+        super().__init__(name=name)
         self.predicate = predicate
-        self.branches = {}
-        for key, node in branches.items():
+        self.nodes = {}
+        for key, node in nodes.items():
             if isinstance(node, Node):
                 pass
             elif isinstance(node, Callable):
@@ -617,7 +715,7 @@ class Switch(ThreadingNode):
                     node = Worker(node)
             else:
                 raise ValueError(f"Invalid node type: {type(node)}")
-            self.branches[key] = node
+            self.nodes[key] = node
         self.fifo_order = Queue()
 
     def _in_thread_fn(self):
@@ -628,9 +726,9 @@ class Switch(ThreadingNode):
                     self.fifo_order.put(EndOfInput())
                     continue
                 key = self.predicate(item)
-                if key not in self.branches:
-                    raise ValueError(f"Switch block key mismatches. \"{key}\" not in found in {list(self.branches.keys())}.")
-                self.branches[key].input.put(item)
+                if key not in self.nodes:
+                    raise ValueError(f"Switch block key mismatches. \"{key}\" not in found in {list(self.nodes.keys())}.")
+                self.nodes[key].input.put(item)
                 self.fifo_order.put(key)
         except ShutDown:
             return
@@ -642,39 +740,37 @@ class Switch(ThreadingNode):
                 if isinstance(key, EndOfInput):
                     self.output.put(EndOfInput())
                     continue
-                item = self.branches[key].output.get()
+                item = self.nodes[key].output.get()
                 self.output.put(item)
         except ShutDown:
             return
         
     def start(self):
         super().start()
-        for node in self.branches.values():
+        for node in self.nodes.values():
             node.start()
 
     def shutdown(self):
         super().shutdown()
         self.fifo_order.shutdown()
-        for node in self.branches.values():
+        for node in self.nodes.values():
             node.shutdown()
 
     def stop(self):
         super().stop()
-        for node in self.branches.values():
+        for node in self.nodes.values():
             node.stop()
 
-    def __repr__(self):
-        return f"Switch(    {self.get_profile_str()}\n" + "\n".join([_add_indent(f"\"{k}\": {repr(v)}") for k, v in self.branches.items()]) + "\n)"
-        
 
 class Router(ThreadingNode):
-    branches: Dict[str, Node]
+    nodes: Dict[str, Node]
     fifo_order: Queue[str]
 
-    def __init__(self, predicate: Callable[[Any], List[str]], branches: Dict[str, Node]):
+    def __init__(self, predicate: Callable[[Any], List[str]], nodes: Dict[str, Union[Node, Callable]], name: Optional[str] = None):
+        super().__init__(name=name)
         self.predicate = predicate
-        self.branches = {}
-        for key, node in branches.items():
+        self.nodes = {}
+        for key, node in nodes.items():
             if isinstance(node, Node):
                 pass
             elif isinstance(node, Callable):
@@ -684,7 +780,7 @@ class Router(ThreadingNode):
                     node = Worker(node)
             else:
                 raise ValueError(f"Invalid node type: {type(node)}")
-            self.branches[key] = node
+            self.nodes[key] = node
         self.fifo_order = Queue(self)
 
     def _in_thread_fn(self):
@@ -697,10 +793,10 @@ class Router(ThreadingNode):
                     continue
                 
                 keys = self.predicate(item)
-                if any(k not in self.branches for k in keys) or any(k not in keys for k in self.branches):
-                    raise ValueError(f"Switch block key mismatches. Input keys: {list(keys)}. Expected keys: {list(self.branches.keys())}.")
+                if any(k not in self.nodes for k in keys) or any(k not in keys for k in self.nodes):
+                    raise ValueError(f"Switch block key mismatches. Input keys: {list(keys)}. Expected keys: {list(self.nodes.keys())}.")
                 for key in keys:
-                    self.branches[key].input.put(item)
+                    self.nodes[key].input.put(item)
                 self.fifo_order.put(keys)
         except ShutDown:
             return
@@ -712,7 +808,7 @@ class Router(ThreadingNode):
                 if isinstance(keys, EndOfInput):
                     self.output.put(EndOfInput())
                     continue
-                item = {k: self.branches[k].output.get() for k in keys}
+                item = {k: self.nodes[k].output.get() for k in keys}
                 self.output.put(item)
         except ShutDown:
             return
@@ -720,31 +816,27 @@ class Router(ThreadingNode):
     def shutdown(self):
         super().shutdown()
         self.fifo_order.shutdown()
-        for node in self.branches.values():
+        for node in self.nodes.values():
             node.shutdown()
 
     def start(self):
         super().start()
-        for node in self.branches.values():
+        for node in self.nodes.values():
             node.start()
 
     def stop(self):
         super().stop()
-        for node in self.branches.values():
+        for node in self.nodes.values():
             node.stop()
-    
-    def __repr__(self):
-        return f"Router(    {self.get_profile_str()}\n" + "\n".join([_add_indent(f"\"{k}\": {repr(v)}") for k, v in self.branches.items()]) + "\n)"
-        
+
 
 class Broadcast(ThreadingNode):
-    branches: Union[List[Node], Dict[str, Node]]
 
-    def __init__(self, branches: Union[List[Node], Dict[str, Node]]):
-        
-        if isinstance(branches, list):
-            self.branches = []
-            for node in branches:
+    def __init__(self, nodes: Union[List[Union[Node, Callable]], Dict[str, Union[Node, Callable]]], name: Optional[str] = None):
+        super().__init__(name=name)
+        if isinstance(nodes, list):
+            self.nodes = []
+            for node in nodes:
                 if isinstance(node, Node):
                     pass
                 elif isinstance(node, Callable):
@@ -754,10 +846,10 @@ class Broadcast(ThreadingNode):
                         node = Worker(node)
                 else:
                     raise ValueError(f"Invalid node type: {type(node)}")
-                self.branches.append(node)
-        elif isinstance(branches, dict):
-            self.branches = {}
-            for key, node in branches.items():
+                self.nodes.append(node)
+        elif isinstance(nodes, dict):
+            self.nodes = {}
+            for key, node in nodes.items():
                 if isinstance(node, Node):
                     pass
                 elif isinstance(node, Callable):
@@ -767,17 +859,17 @@ class Broadcast(ThreadingNode):
                         node = Worker(node)
                 else:
                     raise ValueError(f"Invalid node type: {type(node)}")
-                self.branches[key] = node
+                self.nodes[key] = node
 
     def _in_thread_fn(self):
         try:
             while True:
                 item = self.input.get()
-                if isinstance(self.branches, list):
-                    for node in self.branches:
+                if isinstance(self.nodes, list):
+                    for node in self.nodes:
                         node.input.put(item)
                 else:
-                    for key, node in self.branches.items():
+                    for key, node in self.nodes.items():
                         node.input.put(item)
         except ShutDown:
             return
@@ -785,13 +877,13 @@ class Broadcast(ThreadingNode):
     def _out_thread_fn(self):
         try:
             while True:
-                if isinstance(self.branches, list):
-                    item = [node.output.get() for node in self.branches]
+                if isinstance(self.nodes, list):
+                    item = [node.output.get() for node in self.nodes]
                 else:
-                    item = {k: node.output.get() for k, node in self.branches.items()}
+                    item = {k: node.output.get() for k, node in self.nodes.items()}
 
-                if (isinstance(self.branches, list) and all(isinstance(v, EndOfInput) for v in item)) \
-                    or (isinstance(self.branches, dict) and all(isinstance(v, EndOfInput) for v in item.values())):
+                if (isinstance(self.nodes, list) and all(isinstance(v, EndOfInput) for v in item)) \
+                    or (isinstance(self.nodes, dict) and all(isinstance(v, EndOfInput) for v in item.values())):
                     self.output.put(EndOfInput())
                     continue
 
@@ -801,50 +893,11 @@ class Broadcast(ThreadingNode):
         
     def start(self):
         super().start()
-        for node in self.branches.values():
+        for node in self.nodes.values():
             node.start()
 
     def stop(self):
         super().stop()
-        for node in self.branches.values():
+        for node in self.nodes.values():
             node.stop()
-    
-    def __repr__(self):
-        if isinstance(self.branches, list):
-            return f"Broadcast(    {self.get_profile_str()}\n" + "\n".join(_add_indent(repr(v)) for v in self.branches) + "\n)"
-        else:
-            return f"Broadcast(    {self.get_profile_str()}\n" + "\n".join(_add_indent(f"\"{k}\": {repr(v)}") for k, v in self.branches.items()) + "\n)"
 
-
-class Filter(ThreadingNode):
-    """
-    A node that filters items based on a predicate function. 
-    If the predicate returns True, the item is passed to the output queue, otherwise it is discarded.
-    """
-    def __init__(self, predicate: Optional[Callable[[Any], bool]] = None):
-        """
-        Parameters
-        ---
-        - `predicate`: A function that takes an item and returns True if the item should be passed to the output queue. Default to pass items that are not None.
-        """
-        super().__init__()
-        self.predicate = predicate
-        self.thread_functions = [self.loop]
-
-    def loop(self):
-        try:
-            while True:
-                item = self.input.get()
-                if isinstance(item, EndOfInput):
-                    self.output.put(EndOfInput())
-                    continue
-                if (self.predicate is None and item is not None) or (self.predicate is not None and self.predicate(item)):
-                    self.output.put(item)
-        except ShutDown:
-            return
-
-    def __repr__(self):
-        if self.predicate is None:
-            return "Filter()    {self.get_profile_str()}"
-        else:
-            return f"Filter   {self.get_profile_str()}(fn={self.predicate.__name__})"
