@@ -62,7 +62,7 @@ def format_table(
     lines = []
     header = sep.join(_column_pad(k, widths[k], align.get(k, 'left')) for k in columns)
     lines.append(header)
-    lines.append("-" * len(header))
+    lines.append(sep.join(fill * widths[k] for k in columns))
     for row in data:
         line = sep.join(_column_pad(row.get(k, fill), widths[k], align.get(k, 'left')) for k in columns)
         lines.append(line)

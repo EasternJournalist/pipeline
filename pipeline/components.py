@@ -47,10 +47,10 @@ _PROFILE_FORMATTER = {
 
 _PROFILE_COLUMNS = [
     'Node',
+    "Problem",
     'Waiting for / Waited by Upstream',
     "Working",
     'Waiting for / Waited by Downstream',
-    "Problem",
     'Throughput In / Out',
     'Count In / Out',
 ]
