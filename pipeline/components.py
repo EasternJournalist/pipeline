@@ -8,7 +8,7 @@ import itertools
 import functools
 from .queue import Empty, Full, ShutDown
 from .queue import Queue
-from .utils import format_time, format_throughput, format_table
+from .utils import format_time, format_throughput, format_table, format_percent
 
 
 __all__ = [
@@ -38,27 +38,32 @@ class EndOfInput:
 
 
 _PROFILE_FORMATTER = {
-    'Starvation': lambda x: f"{x * 100:.1f} %",
-    'Backpressure': lambda x: f"{x * 100:.1f} %",
-    'Efficiency': lambda x: f"{x * 100:.1f} %",
-    'Overload': lambda x: f"{x * 100:.1f} %",
-    'In-Throughput': format_throughput,
-    'Out-Throughput': format_throughput,
-    'In-Count': str,
-    'Out-Count': str
+    'Waiting for / Waited by Upstream': lambda x: format_percent(x[0]) + ' / ' + format_percent(x[1]),
+    'Working': format_percent,
+    'Waiting for / Waited by Downstream': lambda x: format_percent(x[0]) + ' / ' + format_percent(x[1]),
+    'Throughput In / Out': lambda x: format_throughput(x[0]) + ' / ' + format_throughput(x[1]),
+    'Count In / Out': lambda x: str(x[0]) + ' / ' + str(x[1]),
 }
 
 _PROFILE_COLUMNS = [
     'Node',
-    'Starvation',
-    'Overload',
-    'Backpressure',
-    'Efficiency',
-    'In-Throughput',
-    'Out-Throughput',
-    'In-Count',
-    'Out-Count'
+    'Waiting for / Waited by Upstream',
+    "Working",
+    'Waiting for / Waited by Downstream',
+    "Problem",
+    'Throughput In / Out',
+    'Count In / Out',
 ]
+
+_PROFILE_ALIGN = {
+    'Node': 'left',
+    'Waiting for / Waited by Upstream': 'center',
+    "Working": 'right',
+    'Waiting for / Waited by Downstream': 'center',
+    "Problem": 'left',
+    'Throughput In / Out': 'center',
+    'Count In / Out': 'center',
+}
 
 class ProfiledQueue(Queue):
     """A Queue that records the get/put block time for profiling purposes."""
@@ -66,27 +71,31 @@ class ProfiledQueue(Queue):
     def __init__(self, maxsize: int = 0):
         super().__init__(maxsize)
         self.profiling_mutex = threading.Lock()
-        self.total_get_block_time = 0.0
-        self.total_put_block_time = 0.0
+        self.total_get_time = 0.0
+        self.total_put_time = 0.0
         self.count_get = 0
         self.count_put = 0
 
     def put(self, item, block=True, timeout=None):
+        if not block:
+            return self.put_nowait(item)
         start_time = time.perf_counter()
         super().put(item, block, timeout)
         end_time = time.perf_counter()
         if not isinstance(item, EndOfInput):
             with self.profiling_mutex:
-                self.total_put_block_time += end_time - start_time
+                self.total_put_time += end_time - start_time
                 self.count_put += 1
 
     def get(self, block=True, timeout=None):
+        if not block:
+            return self.get_nowait()
         start_time = time.perf_counter()
         item = super().get(block, timeout)
         end_time = time.perf_counter()
         if not isinstance(item, EndOfInput):
             with self.profiling_mutex:
-                self.total_get_block_time += end_time - start_time
+                self.total_get_time += end_time - start_time
                 self.count_get += 1
         return item
 
@@ -194,14 +203,40 @@ class Node:
         if not self._is_started:
             return {}
         running_time = time.perf_counter() - self.start_time
+        waiting_for_upstream = self.input.total_get_time / running_time
+        waited_by_upstream = self.input.total_put_time / running_time
+        waiting_for_downstream = self.output.total_put_time / running_time
+        waited_by_downstream = self.output.total_get_time / running_time
+        upstream_pressure = waited_by_upstream - waiting_for_upstream 
+        downstream_pressure = waited_by_downstream - waiting_for_downstream
+        if upstream_pressure > 0 and downstream_pressure > 0:
+            problem_type = 'Bottleneck'
+        elif upstream_pressure > 0 and downstream_pressure <= 0:
+            problem_type = 'Downstream-Bounded'
+        elif upstream_pressure <= 0 and downstream_pressure > 0:
+            problem_type = 'Upstream-Bounded'
+        else:
+            problem_type = 'Idle'
+        abs_pressure = max(abs(upstream_pressure), abs(downstream_pressure))
+        if abs_pressure >= 0.5: 
+            severity = 'Severe'
+        elif abs_pressure >= 0.25:
+            severity = 'Moderate'
+        elif abs_pressure >= 0.05:
+            severity = 'Minor'
+        else:
+            severity = 'None'
+        if severity != 'None':
+            problem = severity + ' ' + problem_type
+        else:
+            problem = 'None'
+
         profile = {
-            "Starvation": self.input.total_get_block_time / running_time,
-            "Overload": self.input.total_put_block_time / running_time,
-            "Backpressure": self.output.total_put_block_time / running_time,
-            "In-Throughput": self.input.count_get / running_time,
-            "Out-Throughput": self.output.count_put / running_time,
-            "In-Count": self.input.count_get,
-            "Out-Count": self.output.count_put,
+            "Waiting for / Waited by Upstream": (waiting_for_upstream, waited_by_upstream),
+            "Waiting for / Waited by Downstream": (waiting_for_downstream, waited_by_downstream),
+            "Problem": problem,
+            "Throughput In / Out": (self.input.count_get / running_time, self.output.count_put / running_time),
+            "Count In / Out": (self.input.count_get, self.output.count_put),
         }
         return profile
 
@@ -226,7 +261,7 @@ class Node:
                 "Node": node_tree_name,
                 **node._profile_single()
             })
-        return format_table(profiles, sep=" | ", fill='-', formatter=_PROFILE_FORMATTER, columns=_PROFILE_COLUMNS)
+        return format_table(profiles, sep=" | ", fill='-', formatter=_PROFILE_FORMATTER, columns=_PROFILE_COLUMNS, align=_PROFILE_ALIGN)
 
     def format_tree(self) -> List[str]:
         if not hasattr(self, 'nodes'):
@@ -337,7 +372,7 @@ class Worker(ThreadingNode):
         profile = super()._profile_single()
         running_time = time.perf_counter() - self.start_time
         profile.update({
-            "Efficiency": self.working_time / running_time
+            "Working": self.working_time / running_time
         })
         return profile
     
@@ -517,7 +552,7 @@ class Filter(ThreadingNode):
         except ShutDown:
             return
 
-    def __repr__(self):
+    def _default_name(self):
         if self.predicate is None:
             return f"Filter()"
         else:

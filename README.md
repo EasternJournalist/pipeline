@@ -31,7 +31,7 @@ import random
 
 # Example functions
 def slow_add(x):
-    time.sleep(random.random()) # <= some slow computation
+    time.sleep(0.2) # <= some slow computation
     return x + 1
 
 def slow_mul(x):
@@ -55,7 +55,7 @@ print(pipe)
 
 # Start the pipeline
 with pipe:  
-    data = range(10)              # Pass an iterable of data
+    data = range(20)              # Pass an iterable of data
     for result in pipe(data):     # Iterate over processed results
         print(f"Result: {result}")
 ```
@@ -70,15 +70,15 @@ print(pipe.profile_str())
 ```
 
 ```text
-Node                        | Starvation | Overload | Backpressure | Efficiency | In-Throughput | Out-Throughput | In-Count | Out-Count
----------------------------------------------------------------------------------------------------------------------------------------
-Sequential                  | 0.0 %      | 66.5 %   | 0.0 %        | -          | 2.47 it/s     | 1.23 it/s      | 10       | 5        
-├─0 Worker(fn=slow_add)     | 0.0 %      | 66.5 %   | 0.0 %        | 87.4 %     | 2.47 it/s     | 2.47 it/s      | 10       | 10       
-├─1 Parallel                | 85.0 %     | 0.0 %    | 0.0 %        | -          | 2.47 it/s     | 2.47 it/s      | 10       | 10       
-│   ├─0 Worker(fn=slow_mul) | 54.8 %     | 0.0 %    | 0.0 %        | 45.1 %     | 1.01 s/it     | 1.01 s/it      | 4        | 4        
-│   ├─1 Worker(fn=slow_mul) | 35.0 %     | 0.0 %    | 0.0 %        | 38.0 %     | 1.35 s/it     | 1.35 s/it      | 3        | 3        
-│   └─2 Worker(fn=slow_mul) | 71.4 %     | 0.0 %    | 0.0 %        | 22.6 %     | 1.35 s/it     | 1.35 s/it      | 3        | 3        
-└─2 Filter                  | 100.0 %    | 0.0 %    | 0.0 %        | -          | 2.47 it/s     | 1.23 it/s      | 10       | 5          
+Node                        | Waiting for / Waited by Upstream | Working | Waiting for / Waited by Downstream | Problem                   |  Throughput In / Out  | Count In / Out
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Sequential                  |          0.0 % /  71.5 %         |       - |           0.0 % /  99.9 %          | Severe Bottleneck         | 3.78 it/s / 1.89 it/s |    20 / 10    
+├─0 Worker(fn=slow_add)     |          0.0 % /  71.5 %         |  75.6 % |           3.5 % /  53.9 %          | Severe Bottleneck         | 3.78 it/s / 3.78 it/s |    20 / 20    
+├─1 Parallel                |         54.0 % /   3.5 %         |       - |           0.0 % / 100.0 %          | Severe Upstream-Bounded   | 3.78 it/s / 3.78 it/s |    20 / 20    
+│   ├─0 Worker(fn=slow_mul) |         18.1 % /   0.0 %         |  81.9 % |           0.0 % /  70.1 %          | Severe Upstream-Bounded   | 1.32 it/s / 1.32 it/s |     7 / 7     
+│   ├─1 Worker(fn=slow_mul) |         28.4 % /   0.0 %         |  57.9 % |           0.0 % /  14.9 %          | Moderate Upstream-Bounded | 1.32 it/s / 1.32 it/s |     7 / 7     
+│   └─2 Worker(fn=slow_mul) |         43.1 % /   0.0 %         |  41.4 % |           0.0 % /   8.1 %          | Moderate Upstream-Bounded | 1.13 it/s / 1.13 it/s |     6 / 6     
+└─2 Filter(fn=<lambda>)     |        100.0 % /   0.0 %         |       - |           0.0 % / 100.0 %          | Severe Upstream-Bounded   | 3.78 it/s / 1.89 it/s |    20 / 10                     
 ```
 
 
