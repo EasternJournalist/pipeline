@@ -81,6 +81,14 @@ Sequential                  |          0.0 % /  71.5 %         |       - |      
 └─2 Filter(fn=<lambda>)     |        100.0 % /   0.0 %         |       - |           0.0 % / 100.0 %          | Severe Upstream-Bounded   | 3.78 it/s / 1.89 it/s |    20 / 10                     
 ```
 
+> Tips for interpreting the profile:
+>
+> Problem type | Description | Suggested Actions
+> -------------|-------------| -----------------
+> Bottleneck | Waited by both upstream and downstream. | Consider optimizing this node / adding more parallelism.
+> Upstream-Bounded | Waiting for upstream & Waited by downstream. | Consider improving upstream performance.
+> Downstream-Bounded | Waited by upstream & Waiting for downstream. | Consider improving downstream performance.
+> Idle | Waiting for both upstream and downstream. | This node may be over-provisioned.
 
 ### Available Components
 
