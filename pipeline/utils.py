@@ -14,10 +14,12 @@ def format_time(seconds: float) -> str:
 
 
 def format_throughput(it_per_sec: float) -> str:
-    if it_per_sec < 10 / 3600:
-        return f"{it_per_sec * 3600} it / h"
+    if it_per_sec == 0:
+        return "0 it/s"
+    elif it_per_sec < 10 / 3600:
+        return f"{it_per_sec * 3600:.2f} it / h"
     elif it_per_sec < 10 / 60:
-        return f"{it_per_sec * 60} it / min"
+        return f"{it_per_sec * 60:.2f} it / min"
     else:
         return f"{it_per_sec:.2f} it/s"
 
@@ -93,7 +95,9 @@ def format_percent_colored(value: float, minor: float = 0.05, moderate: float = 
     
 
 def format_percent(value: float, minor: float = 0.05, significant: float = 0.25, major: float = 0.5) -> str:
-    if value >= major:
+    if value is None:
+        return "     -  "
+    elif value >= major:
         return f"{value * 100:5.1f} %"
     elif value >= significant:
         return f"{value * 100:5.1f} %"

@@ -1,10 +1,21 @@
+"""
+Extensions of queue.Queue.
+"""
+
 import sys
-from time import time
+from time import time, perf_counter
 import threading
-from typing import Callable
+from typing import Callable, Iterable, List, Dict, Optional
 
 from queue import Full, Empty
 from queue import Queue as _Queue
+
+__all__ = [
+    'ShutDown',
+    'Queue',
+    'SharedQueue',
+    'EndOfInput'
+]
 
 # Define a shutdownable queue for Python versions < 3.13
 # Copied from Python 3.13's queue module 
@@ -13,44 +24,20 @@ class ShutDown(Exception):
     pass
 
 
+class EndOfInput:
+    pass
+
 class Queue(_Queue):
     '''An extension of queue.Queue, with
     - backported shutdown() method from Python 3.13
     - waiters and putters count
-    - callbacks on put() and get()
     '''
-    on_get: Callable[['Queue'], None] | None
-    "Callback before each get() operation."
-    on_put: Callable[['Queue'], None] | None
-    "Callback after each put() operation."
     get_waiters: int
     put_waiters: int
     is_shutdown: bool
 
     def __init__(self, maxsize: int = 0):
-        self.maxsize = maxsize
-        self._init(maxsize)
-
-        # mutex must be held whenever the queue is mutating.  All methods
-        # that acquire mutex must release it before returning.  mutex
-        # is shared between the three conditions, so acquiring and
-        # releasing the conditions also acquires and releases mutex.
-        self.mutex = threading.RLock()  # NOTE: different from queue.Queue, using RLock here
-
-        # Notify not_empty whenever an item is added to the queue; a
-        # thread waiting to get is notified then.
-        self.not_empty = threading.Condition(self.mutex)
-
-        # Notify not_full whenever an item is removed from the queue;
-        # a thread waiting to put is notified then.
-        self.not_full = threading.Condition(self.mutex)
-
-        # Notify all_tasks_done whenever the number of unfinished tasks
-        # drops to zero; thread waiting to join() is notified to resume
-        self.all_tasks_done = threading.Condition(self.mutex)
-        self.unfinished_tasks = 0
-
-        # Backport shutdown feature from Python 3.13
+        super().__init__(maxsize)
         self.is_shutdown = False
         self.get_waiters = 0
         self.put_waiters = 0  
@@ -127,7 +114,6 @@ class Queue(_Queue):
             if self.on_put is not None:
                 self.on_put()
 
-
     def get(self, block=True, timeout=None):
         '''Remove and return an item from the queue.
 
@@ -145,9 +131,9 @@ class Queue(_Queue):
         with self.not_empty:
             if self.is_shutdown and not self._qsize():
                 raise ShutDown
+            self.get_waiters += 1
             if self.on_get is not None:
                 self.on_get()
-            self.get_waiters += 1
             try:
                 if not block:
                     # no wait
@@ -174,24 +160,169 @@ class Queue(_Queue):
             item = self._get()
             self.not_full.notify()
             return item
-        
+
+    if sys.version_info >= (3, 9):
+        from types import GenericAlias
+        __class_getitem__ = classmethod(GenericAlias)
+
 
 class SharedQueue:
-    queue: Queue
+    "A queue that can share with upstream/downstream SharedQueues."
+    queue: Optional[Queue]
     "The actual queue instance."
-    on_get: Callable[['Queue'], None] | None
+    on_get: Optional[Callable]
     "Callback before each get() operation."
-    on_put: Callable[['Queue'], None] | None
+    on_put: Optional[Callable]
     "Callback after each put() operation."
+    shared: set['SharedQueue']
+    "The set of SharedQueue instances sharing the same underlying Queue."
+
+    _upstream: Optional['SharedQueue']
+    _downstream: Optional['SharedQueue']
 
     def __init__(self, maxsize: int = 0):
         self.maxsize = maxsize
-        self.shared_queues = set()
+        self._upstream = None
+        self._downstream = None
+        self.shared = set((self,))
         self.queue = None
-        self.mutex = threading.Lock()
-    
-    def get(self, block=True, timeout=None):
-        return self.queue.get(block=block, timeout=timeout)
+        
+        # Callbacks
+        self.on_get = None
+        self.on_put = None
+        
+        # Originally, mutex is released during get/put blocking.
+        # Now we use additionally locks for get/put respectively.
+        # This avoids overlapping get/put time measurements.
+        self.get_lock = threading.Lock()
+        self.put_lock = threading.Lock() 
+        
+        # Profiling info
+        self.total_get_time = 0.0
+        self.total_put_time = 0.0
+        self.count_get = 0
+        self.count_put = 0
 
-    def put (self, block=True, timeout=None):
-        return self.queue.get(block=block, timeout=timeout)
+    @property
+    def is_shutdown(self):
+        if self.queue is None:
+            raise RuntimeError("SharedQueue must be initialized before using.")
+        return self.queue.is_shutdown
+    
+    @property
+    def mutex(self):
+        if self.queue is None:
+            raise RuntimeError("SharedQueue must be initialized before using.")
+        return self.queue.mutex
+
+    def init(self):
+        if self.queue is None:
+            if any(q.maxsize == 0 for q in self.shared):
+                maxsize = 0
+            else:
+                maxsize = sum(q.maxsize for q in self.shared)
+            queue = Queue(maxsize)
+            for q in self.shared:
+                assert q.queue is None, "SharedQueue has been unexpectedly initialized."
+                q.queue = queue
+
+    @property
+    def upstream(self):
+        return self._upstream
+
+    @upstream.setter
+    def upstream(self, value: 'SharedQueue'):
+        if getattr(value, 'downstream', None) is not None and value.downstream is not self:
+            raise RuntimeError("Cannot set upstream whose downstream is set and is not this queue.")
+        shared = set((*self.shared, *value.shared))
+        for q in shared:
+            q.shared = shared
+        self._upstream = value
+
+    @property
+    def downstream(self):
+        return self._downstream
+
+    @downstream.setter
+    def downstream(self, value: 'SharedQueue'):
+        if getattr(value, 'upstream', None) is not None and value.upstream is not self:
+            raise RuntimeError("Cannot set downstream whose upstream is set and is not this queue.")
+        shared = set((*self.shared, *value.shared))
+        for q in shared:
+            q.shared = shared
+        self._downstream = value
+
+    @property
+    def getable(self):
+        return self.downstream is None or self.downstream.upstream is self
+
+    @property
+    def putable(self):
+        return self.upstream is None or self.upstream.downstream is self
+
+    def get(self, block=True, timeout=None):
+        if self.downstream is not None and self.downstream.upstream is not self:
+            raise RuntimeError("Cannot get from a queue with downstream. Items have gone to downstream queue.")
+        with self.get_lock:
+            if self.on_get is not None:
+                self.on_get()
+            start_time = perf_counter()
+            item = (self.upstream or self.queue).get(block=block, timeout=timeout)
+            end_time = perf_counter()
+            if not isinstance(item, EndOfInput):
+                self.total_get_time += end_time - start_time
+                self.count_get += 1
+            return item
+        
+    def put(self, item, block=True, timeout=None):
+        if self.upstream is not None and self.upstream.downstream is not self:
+            raise RuntimeError("Cannot put to a queue with upstream. Items come from upstream queue.")
+        with self.put_lock:
+            start_time = perf_counter()
+            (self.downstream or self.queue).put(item, block=block, timeout=timeout)
+            end_time = perf_counter()
+            if not isinstance(item, EndOfInput):
+                self.total_put_time += end_time - start_time
+                self.count_put += 1
+            if self.on_put is not None:
+                self.on_put()
+            
+
+    def qsize(self):
+        if self.queue is None:
+            raise RuntimeError("SharedQueue must be initialized before using.")
+        return self.queue.qsize()
+
+    def empty(self):
+        if self.queue is None:
+            raise RuntimeError("SharedQueue must be initialized before using.")
+        return self.queue.empty()
+
+    def full(self):
+        if self.queue is None:
+            raise RuntimeError("SharedQueue must be initialized before using.")
+        return self.queue.full()
+    
+    def join(self):
+        if self.queue is None:
+            raise RuntimeError("SharedQueue must be initialized before using.")
+        return self.queue.join()
+
+    def put_nowait(self, item):
+        return self.put(item, block=False)
+    
+    def get_nowait(self):
+        return self.get(block=False)
+
+    def shutdown(self, immediate=False):
+        if self.queue is None:
+            raise RuntimeError("SharedQueue must be initialized before using.")
+        self.queue.shutdown(immediate=immediate)
+
+    if sys.version_info >= (3, 9):
+        from types import GenericAlias
+        __class_getitem__ = classmethod(GenericAlias)
+
+
+
+

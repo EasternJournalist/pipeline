@@ -32,4 +32,4 @@ with pipe:
     for result in pipe(data):     # Iterate over processed results
         print(f"Result: {result}")
 
-print(pipe.profile_str())
+print(pipe.profile())  # Print profiling information

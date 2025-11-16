@@ -66,19 +66,19 @@ The pipeline provides built-in profiling of blocking time and throughput.
 
 ```python
 ... # After running the pipeline, or at any time
-print(pipe.profile_str())
+print(pipe.profile())
 ```
 
 ```text
 Node                        | Problem                   | Waiting for / Waited by Upstream | Working | Waiting for / Waited by Downstream |  Throughput In / Out  | Count In / Out
 --------------------------- | ------------------------- | -------------------------------- | ------- | ---------------------------------- | --------------------- | --------------
-Sequential                  | Severe Bottleneck         |          0.0 % /  72.3 %         |       - |           0.0 % /  99.9 %          | 4.01 it/s / 2.01 it/s |    20 / 10    
-├─0 Worker(fn=slow_add)     | Severe Bottleneck         |          0.0 % /  72.3 %         |  80.3 % |           0.0 % /  55.0 %          | 4.01 it/s / 4.01 it/s |    20 / 20    
-├─1 Parallel                | Severe Upstream-Bounded   |         55.0 % /   0.0 %         |       - |           0.0 % /  99.9 %          | 4.01 it/s / 4.01 it/s |    20 / 20    
-│   ├─0 Worker(fn=slow_mul) | Moderate Upstream-Bounded |         33.9 % /   0.0 %         |  50.4 % |           0.0 % /  18.4 %          | 1.40 it/s / 1.40 it/s |     7 / 7     
-│   ├─1 Worker(fn=slow_mul) | Moderate Upstream-Bounded |         21.0 % /   0.0 %         |  79.0 % |           0.0 % /  43.8 %          | 1.40 it/s / 1.40 it/s |     7 / 7     
-│   └─2 Worker(fn=slow_mul) | Moderate Upstream-Bounded |         22.8 % /   0.0 %         |  53.4 % |           0.0 % /  33.7 %          | 1.20 it/s / 1.20 it/s |     6 / 6     
-└─2 Filter(fn=<lambda>)     | Severe Upstream-Bounded   |        100.0 % /   0.0 %         |       - |           0.0 % / 100.0 %          | 4.01 it/s / 2.01 it/s |    20 / 10                    
+Sequential                  | Severe Bottleneck         |          0.0 % /  77.6 %         |       - |           0.0 % /  99.9 %          | 4.56 it/s / 2.28 it/s |    20 / 10    
+├─0 Worker(fn=slow_add)     | Severe Bottleneck         |          0.0 % /  77.6 %         |  91.3 % |           0.0 % /  85.1 %          | 4.56 it/s / 4.56 it/s |    20 / 20    
+├─1 Parallel                | Severe Upstream-Bounded   |         85.1 % /   0.0 %         |       - |           0.0 % /  99.9 %          | 4.56 it/s / 4.56 it/s |    20 / 20    
+│   ├─0 Worker(fn=slow_mul) | Severe Upstream-Bounded   |         50.2 % /      -          |  47.7 % |           0.0 % /  31.3 %          | 1.60 it/s / 1.60 it/s |     7 / 7     
+│   ├─1 Worker(fn=slow_mul) | Moderate Upstream-Bounded |         37.0 % /      -          |  63.0 % |           0.0 % /  45.7 %          | 1.37 it/s / 1.37 it/s |     6 / 6     
+│   └─2 Worker(fn=slow_mul) | Moderate Upstream-Bounded |         48.9 % /      -          |  45.0 % |           4.0 % /  22.9 %          | 1.60 it/s / 1.60 it/s |     7 / 7     
+└─2 Filter(fn=<lambda>)     | Severe Upstream-Bounded   |        100.0 % /   0.0 %         |       - |           0.0 % / 100.0 %          | 4.56 it/s / 2.28 it/s |    20 / 10 
 ```
 
 > Tips for interpreting the profile:

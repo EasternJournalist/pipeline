@@ -7,7 +7,8 @@ import random
 import itertools
 import functools
 from .queue import Empty, Full, ShutDown
-from .queue import Queue
+from .queue import Queue, SharedQueue, EndOfInput
+from queue import PriorityQueue
 from .utils import format_time, format_throughput, format_table, format_percent
 
 
@@ -29,11 +30,6 @@ __all__ = [
 
 
 DEFAULT_QUEUE_SIZE = 1
-
-
-
-class EndOfInput:
-    pass
 
 
 
@@ -65,53 +61,19 @@ _PROFILE_ALIGN = {
     'Count In / Out': 'center',
 }
 
-class ProfiledQueue(Queue):
-    """A Queue that records the get/put block time for profiling purposes."""
-
-    def __init__(self, maxsize: int = 0):
-        super().__init__(maxsize)
-        self.profiling_mutex = threading.Lock()
-        self.total_get_time = 0.0
-        self.total_put_time = 0.0
-        self.count_get = 0
-        self.count_put = 0
-
-    def put(self, item, block=True, timeout=None):
-        if not block:
-            return self.put_nowait(item)
-        start_time = time.perf_counter()
-        super().put(item, block, timeout)
-        end_time = time.perf_counter()
-        if not isinstance(item, EndOfInput):
-            with self.profiling_mutex:
-                self.total_put_time += end_time - start_time
-                self.count_put += 1
-
-    def get(self, block=True, timeout=None):
-        if not block:
-            return self.get_nowait()
-        start_time = time.perf_counter()
-        item = super().get(block, timeout)
-        end_time = time.perf_counter()
-        if not isinstance(item, EndOfInput):
-            with self.profiling_mutex:
-                self.total_get_time += end_time - start_time
-                self.count_get += 1
-        return item
-
 
 class Node:
     nodes: Union[List['Node'], Dict[str, 'Node']]
     """Child nodes"""
+    input: SharedQueue
+    output: SharedQueue
 
-    def __init__(self, name: str = None):
+    def __init__(self, name: str = None, maxsize: int = 1):
         self._name = name
-        self._in_queue_lock = threading.Lock()
-        self._out_queue_lock = threading.Lock()
-        self._input = None
-        self._output = None
-        self._is_started = False
-        self._is_shutdown = False
+        self.input = SharedQueue(maxsize=maxsize)
+        self.output = SharedQueue(maxsize=maxsize)
+        self.is_started = False
+        self.is_shutdown = False
 
     @property
     def name(self) -> str:
@@ -126,43 +88,17 @@ class Node:
 
     def _default_name(self):
         return f"{self.__class__.__name__}"
-    
-    @property
-    def input(self) -> ProfiledQueue:
-        with self._in_queue_lock:
-            if self._input is None:
-                self._input = ProfiledQueue(maxsize=DEFAULT_QUEUE_SIZE)
-        return self._input
-
-    @input.setter
-    def input(self, value: ProfiledQueue):
-        with self._in_queue_lock:
-            if self._input is not None:
-                raise AttributeError("Node input is already set.")
-            self._input = value
-
-    @property
-    def output(self) -> ProfiledQueue:
-        with self._out_queue_lock:
-            if self._output is None:
-                self._output = ProfiledQueue(maxsize=DEFAULT_QUEUE_SIZE)
-        return self._output
-    
-    @output.setter
-    def output(self, value: ProfiledQueue):
-        with self._out_queue_lock:
-            if self._output is not None:
-                raise AttributeError("Node output is already set.")
-            self._output = value
 
     def start(self):
         "Start the node."
-        self._is_started = True
+        self.is_started = True
         self.start_time = time.perf_counter()
+        self.input.init()
+        self.output.init()
 
     def shutdown(self):
         "Send shutdown signal without waiting for threads/processes to finish. NOTE: Once shutdown is called, the node cannot be restarted."
-        self._is_shutdown = True
+        self.is_shutdown = True
         self.input.shutdown()
         self.output.shutdown()
 
@@ -172,20 +108,20 @@ class Node:
 
     def put(self, data: Any, timeout: float = None) -> None:
         "Put data into the input queue. Blocks if the input queue is full."
-        assert self._is_started, "Node is not started."
+        assert self.is_started, "Node is not started."
         self.input.put(data, timeout=timeout)
     
     def get(self, timeout: float = None) -> Any:
         "Get data from the output queue. Blocks if the output queue is empty."
-        assert self._is_started, "Node is not started."
+        assert self.is_started, "Node is not started."
         return self.output.get(timeout=timeout)
 
     def put_nowait(self, data: Any) -> None:
-        assert self._is_started, "Node is not started."
+        assert self.is_started, "Node is not started."
         self.input.put_nowait(data)
     
     def get_nowait(self) -> Any:
-        assert self._is_started, "Node is not started."
+        assert self.is_started, "Node is not started."
         return self.output.get_nowait()
 
     def __enter__(self):
@@ -196,19 +132,19 @@ class Node:
         self.stop()
 
     def __call__(self, iterator: Iterable):
-        assert self._is_started, "Node is not started."
+        assert self.is_started, "Node is not started."
         return NodeIterator(self, iterator)
 
     def _profile_single(self) -> Dict[str, str]:
-        if not self._is_started:
+        if not self.is_started:
             return {}
         running_time = time.perf_counter() - self.start_time
-        waiting_for_upstream = self.input.total_get_time / running_time
-        waited_by_upstream = self.input.total_put_time / running_time
-        waiting_for_downstream = self.output.total_put_time / running_time
-        waited_by_downstream = self.output.total_get_time / running_time
-        upstream_pressure = waited_by_upstream - waiting_for_upstream 
-        downstream_pressure = waited_by_downstream - waiting_for_downstream
+        waiting_for_upstream = self.input.total_get_time / running_time if self.input.getable else None
+        waited_by_upstream = self.input.total_put_time / running_time if self.input.putable else None
+        waiting_for_downstream = self.output.total_put_time / running_time if self.output.putable else None
+        waited_by_downstream = self.output.total_get_time / running_time if self.output.getable else None
+        upstream_pressure = (waited_by_upstream or 0) - (waiting_for_upstream or 0)
+        downstream_pressure = (waited_by_downstream or 0) - (waiting_for_downstream or 0)
         if upstream_pressure > 0 and downstream_pressure > 0:
             problem_type = 'Bottleneck'
         elif upstream_pressure > 0 and downstream_pressure <= 0:
@@ -248,13 +184,7 @@ class Node:
             for key, node in self.nodes.items() if isinstance(self.nodes, dict) else enumerate(self.nodes):
                 yield from node.iterate_tree(parents + ((self, key),))
 
-    def profile(self) -> Dict[Tuple[Tuple[Tuple['Node', str], ...], 'Node'], Dict[str, float]]:
-        profiles = {}
-        for (parents, node) in self.iterate_tree():
-            profiles[(parents, node)] = node._profile_single()
-        return profiles
-
-    def profile_str(self) -> str:
+    def profile(self) -> str:
         profiles = []
         for node_tree_name, (_, node) in zip(self.format_tree(), self.iterate_tree()):
             profiles.append({
@@ -367,7 +297,7 @@ class Worker(ThreadingNode):
             return
 
     def _profile_single(self) -> Dict[str, str]:
-        if not self._is_started:
+        if not self.is_started:
             return {}
         profile = super()._profile_single()
         running_time = time.perf_counter() - self.start_time
@@ -500,29 +430,15 @@ class Unbatch(ThreadingNode):
             return
 
 
-class Buffer(ThreadingNode):
+class Buffer(Node):
     def __init__(self, size: int, name: Optional[str] = None):
-        super().__init__(name=name)
+        super().__init__(name=name, maxsize=size)
         self.size = size
-        self.thread_functions = [self.loop]
-    
-    @property
-    def output(self):
-        if self._output is None:
-            self._output = Queue(maxsize=self.size)
-        return self._output
-
-    def loop(self):
-        try:
-            while True:
-                item = self.input.get()
-                self.output.put(item)
-        except ShutDown:
-            return
+        self.input.downstream = self.output
+        self.output.upstream = self.input
 
     def _default_name(self):
         return f"Buffer(size={self.size})"
-
 
 
 class Filter(ThreadingNode):
@@ -580,20 +496,13 @@ class Sequential(Node):
                 raise ValueError(f"Invalid node type: {type(node)}")
             self.nodes.append(node)
         
-        for node_pre, node_suc in zip(self.nodes[:-1], self.nodes[1:]):
-            node_suc.input = node_pre.output
-    
-    @property
-    def input(self) -> Queue:
-        return self.nodes[0].input    
-
-    @input.setter
-    def input(self, value: Queue):
-        self.nodes[0].input = value
-
-    @property
-    def output(self) -> Queue:
-        return self.nodes[-1].output
+        self.input.downstream = self.nodes[0].input
+        self.nodes[0].input.upstream = self.input
+        for node_prev, node_next in zip(self.nodes[:-1], self.nodes[1:]):
+            node_prev.output.downstream = node_next.input
+            node_next.input.upstream = node_prev.output
+        self.nodes[-1].output.downstream = self.output
+        self.output.upstream = self.nodes[-1].output
 
     def start(self):
         super().start()
@@ -612,8 +521,7 @@ class Parallel(ThreadingNode):
     NOTE: It is FIFO if and only if all the nested nodes are FIFO.
     """
     nodes: List[Node]
-    working_nodes: Queue[Node]
-    idle_nodes: Queue[Node]
+    fifo_order: Queue[int]
 
     def __init__(self, nodes_or_callable: Union[Callable, Sequence[Union[Node, Callable]]], num_duplicates: int = None, name: Optional[str] = None):
         super().__init__(name=name)
@@ -634,29 +542,21 @@ class Parallel(ThreadingNode):
                 else:
                     raise ValueError(f"Invalid node type: {type(node)}")
                 self.nodes.append(node)
-        self.working_nodes = Queue()
-        self.idle_nodes = Queue()
-        for node in self.nodes:
-            self.idle_nodes.put(node)
-        self.thread_functions = [self._in_thread_fn, self._out_thread_fn]
+        self.fifo_order = Queue()
+        for i, node in enumerate(self.nodes):
+            node.input.upstream = self.input
+            node.input.on_get = functools.partial(self._on_get_callback, i)
+        self.thread_functions = [self._out_thread_fn]
 
-    def _in_thread_fn(self):
-        try:
-            while True:
-                item = self.input.get()
-                node = self.idle_nodes.get()
-                self.working_nodes.put(node)
-                node.input.put(item)
-        except ShutDown:
-            return
+    def _on_get_callback(self, i: int):
+        self.fifo_order.put(i)
     
     def _out_thread_fn(self):
         try:
             while True:
-                node = self.working_nodes.get()
-                item = node.output.get()
+                idx = self.fifo_order.get()
+                item = self.nodes[idx].output.get()
                 self.output.put(item)
-                self.idle_nodes.put(node)
         except ShutDown:
             return
 
@@ -667,8 +567,7 @@ class Parallel(ThreadingNode):
     
     def shutdown(self):
         super().shutdown()
-        self.working_nodes.shutdown()
-        self.idle_nodes.shutdown()
+        self.fifo_order.shutdown()
         for node in self.nodes:
             node.shutdown()
 
