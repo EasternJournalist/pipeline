@@ -28,21 +28,12 @@ class EndOfInput:
     pass
 
 class Queue(_Queue):
-    '''An extension of queue.Queue, with
-    - backported shutdown() method from Python 3.13
-    - waiters and putters count
-    '''
-    get_waiters: int
-    put_waiters: int
+    "Backported shutdownable Queue from Python 3.13."
     is_shutdown: bool
 
     def __init__(self, maxsize: int = 0):
         super().__init__(maxsize)
         self.is_shutdown = False
-        self.get_waiters = 0
-        self.put_waiters = 0  
-        self.on_put = None
-        self.on_get = None
     
     def shutdown(self, immediate=False):
         '''Shut-down the queue, making queue gets and puts raise ShutDown.
@@ -83,36 +74,30 @@ class Queue(_Queue):
         with self.not_full:
             if self.is_shutdown:
                 raise ShutDown
-            self.put_waiters += 1
-            try:
-                if self.maxsize > 0:
-                    if not block:
-                        # no wait
-                        if self._qsize() >= self.maxsize:
+            if self.maxsize > 0:
+                if not block:
+                    # no wait
+                    if self._qsize() >= self.maxsize:
+                        raise Full
+                elif timeout is None:
+                    while self._qsize() >= self.maxsize:
+                        self.not_full.wait()
+                        if self.is_shutdown:
+                            raise ShutDown
+                elif timeout < 0:
+                    raise ValueError("'timeout' must be a non-negative number")
+                else:
+                    endtime = time() + timeout
+                    while self._qsize() >= self.maxsize:
+                        remaining = endtime - time()
+                        if remaining <= 0.0:
                             raise Full
-                    elif timeout is None:
-                        while self._qsize() >= self.maxsize:
-                            self.not_full.wait()
-                            if self.is_shutdown:
-                                raise ShutDown
-                    elif timeout < 0:
-                        raise ValueError("'timeout' must be a non-negative number")
-                    else:
-                        endtime = time() + timeout
-                        while self._qsize() >= self.maxsize:
-                            remaining = endtime - time()
-                            if remaining <= 0.0:
-                                raise Full
-                            self.not_full.wait(remaining)
-                            if self.is_shutdown:
-                                raise ShutDown
-            finally:
-                self.put_waiters -= 1
+                        self.not_full.wait(remaining)
+                        if self.is_shutdown:
+                            raise ShutDown
             self._put(item)
             self.unfinished_tasks += 1
             self.not_empty.notify()
-            if self.on_put is not None:
-                self.on_put()
 
     def get(self, block=True, timeout=None):
         '''Remove and return an item from the queue.
@@ -131,32 +116,25 @@ class Queue(_Queue):
         with self.not_empty:
             if self.is_shutdown and not self._qsize():
                 raise ShutDown
-            self.get_waiters += 1
-            if self.on_get is not None:
-                self.on_get()
-            try:
-                if not block:
-                    # no wait
-                    if not self._qsize():
+            if not block:
+                if not self._qsize():
+                    raise Empty
+            elif timeout is None:
+                while not self._qsize():
+                    self.not_empty.wait()
+                    if self.is_shutdown and not self._qsize():
+                        raise ShutDown
+            elif timeout < 0:
+                raise ValueError("'timeout' must be a non-negative number")
+            else:
+                endtime = time() + timeout
+                while not self._qsize():
+                    remaining = endtime - time()
+                    if remaining <= 0.0:
                         raise Empty
-                elif timeout is None:
-                    while not self._qsize():
-                        self.not_empty.wait()
-                        if self.is_shutdown and not self._qsize():
-                            raise ShutDown
-                elif timeout < 0:
-                    raise ValueError("'timeout' must be a non-negative number")
-                else:
-                    endtime = time() + timeout
-                    while not self._qsize():
-                        remaining = endtime - time()
-                        if remaining <= 0.0:
-                            raise Empty
-                        self.not_empty.wait(remaining)
-                        if self.is_shutdown and not self._qsize():
-                            raise ShutDown
-            finally:
-                self.get_waiters -= 1
+                    self.not_empty.wait(remaining)
+                    if self.is_shutdown and not self._qsize():
+                        raise ShutDown
             item = self._get()
             self.not_full.notify()
             return item
@@ -194,8 +172,10 @@ class SharedQueue:
         # Originally, mutex is released during get/put blocking.
         # Now we use additionally locks for get/put respectively.
         # This avoids overlapping get/put time measurements.
-        self.get_lock = threading.Lock()
-        self.put_lock = threading.Lock() 
+        self.self_get_lock = threading.Lock()
+        self.self_put_lock = threading.Lock()
+        self.shared_get_lock = None
+        self.shared_put_lock = None
         
         # Profiling info
         self.total_get_time = 0.0
@@ -208,15 +188,11 @@ class SharedQueue:
         if self.queue is None:
             raise RuntimeError("SharedQueue must be initialized before using.")
         return self.queue.is_shutdown
-    
-    @property
-    def mutex(self):
-        if self.queue is None:
-            raise RuntimeError("SharedQueue must be initialized before using.")
-        return self.queue.mutex
 
     def init(self):
         if self.queue is None:
+            shared_put_lock = threading.RLock()
+            shared_get_lock = threading.RLock()
             if any(q.maxsize == 0 for q in self.shared):
                 maxsize = 0
             else:
@@ -225,6 +201,8 @@ class SharedQueue:
             for q in self.shared:
                 assert q.queue is None, "SharedQueue has been unexpectedly initialized."
                 q.queue = queue
+                q.shared_put_lock = shared_put_lock
+                q.shared_get_lock = shared_get_lock
 
     @property
     def upstream(self):
@@ -263,11 +241,12 @@ class SharedQueue:
     def get(self, block=True, timeout=None):
         if self.downstream is not None and self.downstream.upstream is not self:
             raise RuntimeError("Cannot get from a queue with downstream. Items have gone to downstream queue.")
-        with self.get_lock:
-            if self.on_get is not None:
-                self.on_get()
+        with self.self_get_lock:
             start_time = perf_counter()
-            item = (self.upstream or self.queue).get(block=block, timeout=timeout)
+            with self.shared_get_lock:
+                if self.on_get is not None:
+                    self.on_get()
+                item = (self.upstream or self.queue).get(block=block, timeout=timeout)
             end_time = perf_counter()
             if not isinstance(item, EndOfInput):
                 self.total_get_time += end_time - start_time
@@ -277,16 +256,16 @@ class SharedQueue:
     def put(self, item, block=True, timeout=None):
         if self.upstream is not None and self.upstream.downstream is not self:
             raise RuntimeError("Cannot put to a queue with upstream. Items come from upstream queue.")
-        with self.put_lock:
+        with self.self_put_lock:
             start_time = perf_counter()
-            (self.downstream or self.queue).put(item, block=block, timeout=timeout)
+            with self.shared_put_lock:
+                (self.downstream or self.queue).put(item, block=block, timeout=timeout)
+                if self.on_put is not None:
+                    self.on_put()
             end_time = perf_counter()
             if not isinstance(item, EndOfInput):
                 self.total_put_time += end_time - start_time
                 self.count_put += 1
-            if self.on_put is not None:
-                self.on_put()
-            
 
     def qsize(self):
         if self.queue is None:
