@@ -6,6 +6,7 @@ A multithreaded Python framework for building concurrent data pipelines.
 * **Targets to I/O and NumPy/PyTorch data workloads**.
 * **Handles complex, branched pipelines**.
 * **Guarantees FIFO data order**.
+* **Built-in profiling of performance**.
 
 ## Installation
 
@@ -13,10 +14,7 @@ A multithreaded Python framework for building concurrent data pipelines.
 pip install git+https://github.com/EasternJournalist/pipeline.git
 ```
 
-
-## Usage
-
-### Quick Start
+## Quick Start
 
 Let's build a simple pipeline that performs the following operations:
 - Adds 1 to each input number.
@@ -58,37 +56,10 @@ with pipe:
     data = range(20)              # Pass an iterable of data
     for result in pipe(data):     # Iterate over processed results
         print(f"Result: {result}")
+
 ```
 
-### Profiling Performance
-
-The pipeline provides built-in profiling of blocking time and throughput. 
-
-```python
-... # After running the pipeline, or at any time
-print(pipe.profile())
-```
-
-```text
-Node                        | Problem                   | Waiting for / Waited by Upstream | Working | Waiting for / Waited by Downstream |  Throughput In / Out  | Count In / Out
---------------------------- | ------------------------- | -------------------------------- | ------- | ---------------------------------- | --------------------- | --------------
-Sequential                  | Severe Bottleneck         |          0.0 % /  77.6 %         |       - |           0.0 % /  99.9 %          | 4.56 it/s / 2.28 it/s |    20 / 10    
-├─0 Worker(fn=slow_add)     | Severe Bottleneck         |          0.0 % /  77.6 %         |  91.3 % |           0.0 % /  85.1 %          | 4.56 it/s / 4.56 it/s |    20 / 20    
-├─1 Parallel                | Severe Upstream-Bounded   |         85.1 % /   0.0 %         |       - |           0.0 % /  99.9 %          | 4.56 it/s / 4.56 it/s |    20 / 20    
-│   ├─0 Worker(fn=slow_mul) | Severe Upstream-Bounded   |         50.2 % /      -          |  47.7 % |           0.0 % /  31.3 %          | 1.60 it/s / 1.60 it/s |     7 / 7     
-│   ├─1 Worker(fn=slow_mul) | Moderate Upstream-Bounded |         37.0 % /      -          |  63.0 % |           0.0 % /  45.7 %          | 1.37 it/s / 1.37 it/s |     6 / 6     
-│   └─2 Worker(fn=slow_mul) | Moderate Upstream-Bounded |         48.9 % /      -          |  45.0 % |           4.0 % /  22.9 %          | 1.60 it/s / 1.60 it/s |     7 / 7     
-└─2 Filter(fn=<lambda>)     | Severe Upstream-Bounded   |        100.0 % /   0.0 %         |       - |           0.0 % / 100.0 %          | 4.56 it/s / 2.28 it/s |    20 / 10 
-```
-
-> Tips for interpreting the profile:
->
-> Problem type | Description | Suggested Actions
-> -------------|-------------| -----------------
-> Bottleneck | Waited by both upstream and downstream. | Consider optimizing this node / adding more parallelism.
-> Upstream-Bounded | Waiting for upstream & Waited by downstream. | Consider improving upstream performance.
-> Downstream-Bounded | Waited by upstream & Waiting for downstream. | Consider improving downstream performance.
-> Idle | Waiting for both upstream and downstream. | This node may be over-provisioned.
+## More Usage
 
 ### Available Components
 
@@ -161,3 +132,83 @@ Beyond `Parallel` and `Sequential`, the following components are available for f
     </tr>
   </tbody>
 </table>
+
+
+### Profiling Performance
+
+The pipeline provides built-in profiling of blocking time and throughput. 
+
+```python
+... # After running the pipeline, or at any time
+print(pipe.profile())
+```
+
+```text
+Node                        |      Indicator      | Waiting In / Out  |  Waited In / Out  | Working |  Throughput In / Out  | Count In / Out
+--------------------------- | ------------------- | ----------------- | ----------------- | ------- | --------------------- | --------------
+Sequential                  |      >>> / <<<<     |   0.0 % /   0.0 % |  69.3 % / 100.0 % |       - | 4.07 it/s / 2.04 it/s |    20 / 10    
+├─0 Worker(fn=slow_add)     |      >>> / <<       |   0.0 % /   0.0 % |  69.3 % /  41.1 % |  81.5 % | 4.07 it/s / 4.07 it/s |    20 / 20    
+├─1 Parallel                |       << / <<<<     |  41.1 % /   0.0 % |   0.0 % / 100.0 % |       - | 4.07 it/s / 4.07 it/s |    20 / 20    
+│   ├─0 Worker(fn=slow_mul) |        < / <<<      |   8.4 % /   0.0 % |   0.0 % /  54.2 % |  80.1 % | 1.22 it/s / 1.22 it/s |     6 / 6     
+│   ├─1 Worker(fn=slow_mul) |        < / <        |  23.3 % /   1.1 % |   0.0 % /  21.2 % |  75.5 % | 1.63 it/s / 1.63 it/s |     8 / 8     
+│   └─2 Worker(fn=slow_mul) |        < / <        |  21.7 % /   0.0 % |   0.0 % /  24.6 % |  66.1 % | 1.22 it/s / 1.22 it/s |     6 / 6     
+└─2 Filter(fn=<lambda>)     |     <<<< / <<<<     | 100.0 % /   0.0 % |   0.0 % /  99.9 % |       - | 4.07 it/s / 2.04 it/s |    20 / 10      
+```
+
+The indicators summarize the blocking status of each node. It can be interpreted as `Upstream vs. Me / Me vs Downstream`. The symbols `>` represent left is faster than and waiting for right, while `<` conversely. The number of symbols indicates the severity of the blocking (`=`: 0~5% `>`: 5%~25%, `>>`: 25%~50%, `>>>`: 50%~75%, `>>>>`: 75%~100%).
+
+A good practice is to follow the direction of the arrows which point towards the bottleneck. For example, if you see `>>> / <<<`, it indicates that the current node is a bottleneck and should be optimized. If you see `<<< / <<<`, it suggests that the upstream node is slow and needs improvement.
+
+When you see both `>` and `<` at the same side, it does happen when the stream is unstable and fluctuating, indicating that the node is both waiting for and being waited by its upstream or downstream. Buffering components may help in this case.
+
+Here is a quick reference for the indicators:
+
+> Indicator | Problem Type | Suggested Actions
+> -------------|-------------| -----------------
+> `>>> / <<<` | Bottleneck | Consider optimizing this node / adding more parallelism.
+> `<<< / <<<` | Upstream slow | Consider improving upstream performance.
+> `>>> / >>>` | Downstream slow | Consider improving downstream performance.
+> `<<< / >>>` | Idle | This node may be over-provisioned.
+> `>><< / >><<` | Fluctuating | Consider adding buffering in between stages to smooth out fluctuations.
+
+
+### Exception Handling
+
+When a worker node raises an exception during processing, the exception is propagated to the pipeline output and will be raised as an `ExceptionInNode` when calling `get()` or iterating over results. This ensures errors are not silently ignored and allows the main thread to handle them.
+
+```python
+with pipe:  
+    data = range(20)              # Pass an iterable of data
+    iterator = pipe(data)         # Get an iterator over processed results
+    while True:
+        try:
+            result = next(iterator)  # Get next processed result
+            print(f"Result: {result}")
+        except pipeline.ExceptionInNode as e:
+            print(f"Caught an exception from node '{e.node.name}': {e.original_exception}")
+        except StopIteration:
+            break
+```
+
+1. Behavior of the node that raises an exception
+  - Stops processing: The node will no longer handle any further inputs.
+  - Cannot automatically recover: The node is considered "dead" for the remainder of the pipeline’s lifetime.
+2. Propagation of exceptions in the pipeline
+  - Downstream nodes continue working: Exceptions are passed along as results without stopping downstream nodes.
+  - Result order is preserved: Exceptions occupy the position corresponding to their input, maintaining the overall output order.
+3. Handling in the main thread and default behavior
+  - Default behavior if uncaught: An uncaught ExceptionInNode will typically exit the pipeline context, shutting down all nodes and terminating the program. This prevents partially failed nodes from silently continuing.
+  - Continuing after an exception: You can catch ExceptionInNode in the main thread to allow the pipeline to keep running.
+4. Effect of exceptions on different component types
+  - Redundant components (e.g., Parallel):
+    - Only the failing worker stops.
+    - Other parallel workers continue processing their tasks.
+    - The pipeline continues, but with reduced parallelism.
+  - Non-redundant components (e.g., Sequential):
+    - The failing node can no longer produce outputs.
+    - Downstream nodes are blocked waiting for input.
+    - The component (and possibly the pipeline) cannot progress further.
+5. Output order after exceptions
+  - Order is always preserved: Exceptions do not disrupt the correspondence between input and output.
+  - Catching exceptions does not break the sequence: If you catch the exception and continue iterating, subsequent valid results will still be yielded in order.
+

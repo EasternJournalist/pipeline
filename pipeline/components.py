@@ -6,10 +6,10 @@ import time
 import random
 import itertools
 import functools
-from .queue import Empty, Full, ShutDown
-from .queue import Queue, SharedQueue, EndOfInput
+from .queue import Empty, Full, ShutDown, Queue, SharedQueue
 from queue import PriorityQueue
 from .utils import format_time, format_throughput, format_table, format_percent
+import traceback
 
 
 __all__ = [
@@ -25,7 +25,9 @@ __all__ = [
     'Broadcast',
     'Switch',
     'Router',
-    'Filter'
+    'Filter',
+    'ExceptionInNode',
+    'EndOfInput',
 ]
 
 
@@ -34,33 +36,47 @@ DEFAULT_QUEUE_SIZE = 1
 
 
 _PROFILE_FORMATTER = {
-    'Waiting for / Waited by Upstream': lambda x: format_percent(x[0]) + ' / ' + format_percent(x[1]),
+    'Waiting In / Out': lambda x: format_percent(x[0]) + ' / ' + format_percent(x[1]),
+    'Waited In / Out': lambda x: format_percent(x[0]) + ' / ' + format_percent(x[1]),
     'Working': format_percent,
-    'Waiting for / Waited by Downstream': lambda x: format_percent(x[0]) + ' / ' + format_percent(x[1]),
     'Throughput In / Out': lambda x: format_throughput(x[0]) + ' / ' + format_throughput(x[1]),
     'Count In / Out': lambda x: str(x[0]) + ' / ' + str(x[1]),
 }
 
 _PROFILE_COLUMNS = [
     'Node',
-    "Problem",
-    'Waiting for / Waited by Upstream',
+    "Indicator",
+    'Waiting In / Out',
+    'Waited In / Out',
     "Working",
-    'Waiting for / Waited by Downstream',
     'Throughput In / Out',
     'Count In / Out',
 ]
 
 _PROFILE_ALIGN = {
     'Node': 'left',
-    'Waiting for / Waited by Upstream': 'center',
+    'Waiting In / Out': 'center',
+    'Waited In / Out': 'center',
     "Working": 'right',
-    'Waiting for / Waited by Downstream': 'center',
-    "Problem": 'left',
+    "Indicator": 'center',
     'Throughput In / Out': 'center',
     'Count In / Out': 'center',
 }
 
+
+class EndOfInput:
+    pass
+
+class ExceptionInNode(Exception):
+    def __init__(self, original_exception: Exception, node: 'Node' = None):
+        self.original_exception = original_exception
+        self.node = node
+
+    def __str__(self):
+        return f"Exception in node \"{self.node.name}\": {self.original_exception}"
+
+
+SharedQueue.__ignore_profile_class__ = (EndOfInput, ExceptionInNode)
 
 class Node:
     nodes: Union[List['Node'], Dict[str, 'Node']]
@@ -114,7 +130,10 @@ class Node:
     def get(self, timeout: float = None) -> Any:
         "Get data from the output queue. Blocks if the output queue is empty."
         assert self.is_started, "Node is not started."
-        return self.output.get(timeout=timeout)
+        item = self.output.get(timeout=timeout)
+        if isinstance(item, ExceptionInNode):
+            raise item from item.original_exception
+        return item
 
     def put_nowait(self, data: Any) -> None:
         assert self.is_started, "Node is not started."
@@ -132,45 +151,30 @@ class Node:
         self.stop()
 
     def __call__(self, iterator: Iterable):
+        "Process an iterable of data through the node, yielding processed results."
         assert self.is_started, "Node is not started."
         return NodeIterator(self, iterator)
 
     def _profile_single(self) -> Dict[str, str]:
         if not self.is_started:
             return {}
+        waiting_for_upstream = self.input.avg_get_pct
+        waited_by_upstream = self.input.avg_put_pct
+        waiting_for_downstream = self.output.avg_put_pct
+        waited_by_downstream = self.output.avg_get_pct
         running_time = time.perf_counter() - self.start_time
-        waiting_for_upstream = self.input.total_get_time / running_time if self.input.getable else None
-        waited_by_upstream = self.input.total_put_time / running_time if self.input.putable else None
-        waiting_for_downstream = self.output.total_put_time / running_time if self.output.putable else None
-        waited_by_downstream = self.output.total_get_time / running_time if self.output.getable else None
-        upstream_pressure = (waited_by_upstream or 0) - (waiting_for_upstream or 0)
-        downstream_pressure = (waited_by_downstream or 0) - (waiting_for_downstream or 0)
-        if upstream_pressure > 0 and downstream_pressure > 0:
-            problem_type = 'Bottleneck'
-        elif upstream_pressure > 0 and downstream_pressure <= 0:
-            problem_type = 'Downstream-Bounded'
-        elif upstream_pressure <= 0 and downstream_pressure > 0:
-            problem_type = 'Upstream-Bounded'
-        else:
-            problem_type = 'Idle'
-        abs_pressure = max(abs(upstream_pressure), abs(downstream_pressure))
-        if abs_pressure >= 0.5: 
-            severity = 'Severe'
-        elif abs_pressure >= 0.25:
-            severity = 'Moderate'
-        elif abs_pressure >= 0.05:
-            severity = 'Minor'
-        else:
-            severity = 'None'
-        if severity != 'None':
-            problem = severity + ' ' + problem_type
-        else:
-            problem = 'None'
-
+        severity = lambda x: 0 if x < 0.05 else 1 if x < 0.25 else 2 if x < 0.5 else 3 if x < 0.75 else 4
+        upstream_indicator = '>' * severity(waited_by_upstream) + '<' * severity(waiting_for_upstream)
+        if upstream_indicator == '':
+            upstream_indicator = '='
+        downstream_indicator = '>' * severity(waiting_for_downstream) + '<' * severity(waited_by_downstream)
+        if downstream_indicator == '':
+            downstream_indicator = '='
+        indicator = f'{upstream_indicator:>8} / {downstream_indicator:<8}'
         profile = {
-            "Waiting for / Waited by Upstream": (waiting_for_upstream, waited_by_upstream),
-            "Waiting for / Waited by Downstream": (waiting_for_downstream, waited_by_downstream),
-            "Problem": problem,
+            "Indicator": indicator,
+            "Waiting In / Out": (waiting_for_upstream, waiting_for_downstream),
+            "Waited In / Out": (waited_by_upstream, waited_by_downstream),
             "Throughput In / Out": (self.input.count_get / running_time, self.output.count_put / running_time),
             "Count In / Out": (self.input.count_get, self.output.count_put),
         }
@@ -185,6 +189,7 @@ class Node:
                 yield from node.iterate_tree(parents + ((self, key),))
 
     def profile(self) -> str:
+        "Generate profiling information table for the node and its child nodes."
         profiles = []
         for node_tree_name, (_, node) in zip(self.format_tree(), self.iterate_tree()):
             profiles.append({
@@ -217,6 +222,7 @@ class Node:
 
 
 class NodeIterator:
+    """An iterator that feeds data into a node and yields processed results from the node."""
     def __init__(self, node: Node, iterator: Iterable):
         self.node = node
         self.iterator = iterator
@@ -238,6 +244,8 @@ class NodeIterator:
         item = self.node.get()
         if isinstance(item, EndOfInput):
             raise StopIteration()
+        elif isinstance(item, ExceptionInNode):
+            raise item from item.original_exception
         return item
 
 
@@ -258,6 +266,7 @@ class ThreadingNode(Node):
 
 
 class Worker(ThreadingNode):
+    "Worker node that processes data in a separate thread."
     def __init__(self, work: Callable = None, name: str = None):
         super().__init__(name=name)
         self.work_fn = work
@@ -284,11 +293,15 @@ class Worker(ThreadingNode):
         try:
             while True:
                 item = self.input.get()
-                if isinstance(item, EndOfInput):
-                    self.output.put(EndOfInput())
+                if isinstance(item, (EndOfInput, ExceptionInNode)):
+                    self.output.put(item)
                     continue
                 start_time = time.perf_counter()
-                result = self.work(item)
+                try:
+                    result = self.work(item)
+                except Exception as e:
+                    self.output.put(ExceptionInNode(e, self))
+                    raise
                 end_time = time.perf_counter()
                 self.working_time += end_time - start_time
                 self.count_work += 1
@@ -339,6 +352,9 @@ class Source(ThreadingNode):
                 self.output.put(data)
         except ShutDown:
             return
+        except Exception as e:
+            self.output.put(ExceptionInNode(e, traceback.format_exc()))
+            return
 
     def _default_name(self):
         if self.provide_fn is None:
@@ -385,8 +401,8 @@ class Batch(ThreadingNode):
                         item = self.input.get(timeout=timeout)
                     except Empty:
                         break
-                    # If the item is EndOfInput, break the loop
-                    if isinstance(item, EndOfInput):
+                    # If the item is EndOfInput or ExceptionInNode, break the loop
+                    if isinstance(item, (EndOfInput, ExceptionInNode)):
                         break
                     # If the first item, start timing
                     if i == 0:
@@ -396,8 +412,8 @@ class Batch(ThreadingNode):
                 if len(batch) > 0:
                     self.output.put(batch)
 
-                if isinstance(item, EndOfInput):
-                    self.output.put(EndOfInput())
+                if isinstance(item, (EndOfInput, ExceptionInNode)):
+                    self.output.put(item)
                     continue
         except ShutDown:
             return
@@ -421,8 +437,8 @@ class Unbatch(ThreadingNode):
         try:
             while True:
                 batch = self.input.get()
-                if isinstance(batch, EndOfInput):
-                    self.output.put(EndOfInput())
+                if isinstance(batch, (EndOfInput, ExceptionInNode)):
+                    self.output.put(batch)
                     continue
                 for item in batch:
                     self.output.put(item)
@@ -431,6 +447,7 @@ class Unbatch(ThreadingNode):
 
 
 class Buffer(Node):
+    "Buffer node can store items in a queue of specified size, smoothing the data flow between nodes."
     def __init__(self, size: int, name: Optional[str] = None):
         super().__init__(name=name, maxsize=size)
         self.size = size
@@ -460,8 +477,8 @@ class Filter(ThreadingNode):
         try:
             while True:
                 item = self.input.get()
-                if isinstance(item, EndOfInput):
-                    self.output.put(EndOfInput())
+                if isinstance(item, (EndOfInput, ExceptionInNode)):
+                    self.output.put(item)
                     continue
                 if (self.predicate is None and item is not None) or (self.predicate is not None and self.predicate(item)):
                     self.output.put(item)
@@ -545,12 +562,12 @@ class Parallel(ThreadingNode):
         self.fifo_order = Queue()
         for i, node in enumerate(self.nodes):
             node.input.upstream = self.input
-            node.input.on_get = functools.partial(self._on_get_callback, i)
+            node.input.on_get = functools.partial(self._on_get_callback, self.fifo_order, i)
         self.thread_functions = [self._out_thread_fn]
 
-    def _on_get_callback(self, i: int):
-        self.fifo_order.put(i)
-    
+    def _on_get_callback(self, fifo_order: Queue, i: int):
+        fifo_order.put(i)
+
     def _out_thread_fn(self):
         try:
             while True:
@@ -601,9 +618,9 @@ class Distribute(ThreadingNode):
             while True:
                 item = self.input.get()
 
-                if isinstance(item, EndOfInput):
+                if isinstance(item, (EndOfInput, ExceptionInNode)):
                     for node in self.nodes.values():
-                        node.input.put(EndOfInput())
+                        node.input.put(item)
                     continue
 
                 if any(k not in self.nodes for k in item) or any(k not in item for k in self.nodes):
@@ -617,8 +634,8 @@ class Distribute(ThreadingNode):
         try:
             while True:
                 item = {k: node.output.get() for k, node in self.nodes.items()}
-                if all(isinstance(v, EndOfInput) for v in item.values()):
-                    self.output.put(EndOfInput())
+                if any(isinstance(v, (EndOfInput, ExceptionInNode)) for v in item.values()):
+                    self.output.put(next(x for x in item.values() if isinstance(x, (EndOfInput, ExceptionInNode))))
                     continue
                 self.output.put(item)
         except ShutDown:
@@ -665,8 +682,8 @@ class Switch(ThreadingNode):
         try:
             while True:
                 item = self.input.get()
-                if isinstance(item, EndOfInput):
-                    self.fifo_order.put(EndOfInput())
+                if isinstance(item, (EndOfInput, ExceptionInNode)):
+                    self.fifo_order.put(item)
                     continue
                 key = self.predicate(item)
                 if key not in self.nodes:
@@ -675,13 +692,16 @@ class Switch(ThreadingNode):
                 self.fifo_order.put(key)
         except ShutDown:
             return
+        except Exception as e:
+            self.fifo_order.put(ExceptionInNode(e, traceback.format_exc()))
+            return
 
     def _out_thread_fn(self):
         try:
             while True:
                 key = self.fifo_order.get()
-                if isinstance(key, EndOfInput):
-                    self.output.put(EndOfInput())
+                if isinstance(key, (EndOfInput, ExceptionInNode)):
+                    self.output.put(key)
                     continue
                 item = self.nodes[key].output.get()
                 self.output.put(item)
@@ -724,18 +744,21 @@ class Router(ThreadingNode):
             else:
                 raise ValueError(f"Invalid node type: {type(node)}")
             self.nodes[key] = node
-        self.fifo_order = Queue(self)
+        self.fifo_order = Queue()
 
     def _in_thread_fn(self):
         try:
             while True:
                 item = self.input.get()
-                
-                if isinstance(item, EndOfInput):
-                    self.fifo_order.put(EndOfInput())
+
+                if isinstance(item, (EndOfInput, ExceptionInNode)):
+                    self.fifo_order.put(item)
                     continue
-                
-                keys = self.predicate(item)
+                try:
+                    keys = self.predicate(item)
+                except Exception as e:
+                    self.fifo_order.put(ExceptionInNode(e, traceback.format_exc()))
+                    continue
                 if any(k not in self.nodes for k in keys) or any(k not in keys for k in self.nodes):
                     raise ValueError(f"Switch block key mismatches. Input keys: {list(keys)}. Expected keys: {list(self.nodes.keys())}.")
                 for key in keys:
@@ -748,8 +771,8 @@ class Router(ThreadingNode):
         try:
             while True:
                 keys = self.fifo_order.get()
-                if isinstance(keys, EndOfInput):
-                    self.output.put(EndOfInput())
+                if isinstance(keys, (EndOfInput, ExceptionInNode)):
+                    self.output.put(keys)
                     continue
                 item = {k: self.nodes[k].output.get() for k in keys}
                 self.output.put(item)
@@ -825,9 +848,8 @@ class Broadcast(ThreadingNode):
                 else:
                     item = {k: node.output.get() for k, node in self.nodes.items()}
 
-                if (isinstance(self.nodes, list) and all(isinstance(v, EndOfInput) for v in item)) \
-                    or (isinstance(self.nodes, dict) and all(isinstance(v, EndOfInput) for v in item.values())):
-                    self.output.put(EndOfInput())
+                if any(isinstance(v, (EndOfInput, ExceptionInNode)) for v in (item.values() if isinstance(self.nodes, dict) else item)):
+                    self.output.put(next(x for x in (item.values() if isinstance(self.nodes, dict) else item) if isinstance(x, (EndOfInput, ExceptionInNode))))
                     continue
 
                 self.output.put(item)
@@ -843,4 +865,3 @@ class Broadcast(ThreadingNode):
         super().stop()
         for node in self.nodes.values():
             node.stop()
-

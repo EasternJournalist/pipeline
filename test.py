@@ -8,7 +8,10 @@ def slow_add(x):
     return x + 1
 
 def slow_mul(x):
+    print(x)
     time.sleep(random.random()) # <= some slow computation
+    if x == 13:
+        raise ValueError("Number 13!")  # <= simulate an error
     return x * 3
 
 # Building the pipeline
@@ -29,7 +32,14 @@ print(pipe)
 # Start the pipeline
 with pipe:  
     data = range(20)              # Pass an iterable of data
-    for result in pipe(data):     # Iterate over processed results
-        print(f"Result: {result}")
+    iterator = pipe(data)        # Get an iterator over processed results
+    while True:
+        try:
+            result = next(iterator)  # Get next processed result
+            print(f"Result: {result}")
+        except pipeline.ExceptionInNode as e:
+            print(f"Caught an exception from node")
+        except StopIteration:
+            break
 
 print(pipe.profile())  # Print profiling information

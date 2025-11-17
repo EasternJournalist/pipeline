@@ -14,7 +14,6 @@ __all__ = [
     'ShutDown',
     'Queue',
     'SharedQueue',
-    'EndOfInput'
 ]
 
 # Define a shutdownable queue for Python versions < 3.13
@@ -23,9 +22,6 @@ class ShutDown(Exception):
     """Raised when put/get with shut-down queue."""
     pass
 
-
-class EndOfInput:
-    pass
 
 class Queue(_Queue):
     "Backported shutdownable Queue from Python 3.13."
@@ -149,14 +145,16 @@ class SharedQueue:
     queue: Optional[Queue]
     "The actual queue instance."
     on_get: Optional[Callable]
-    "Callback before each get() operation."
+    "Callback before each get() operation. (Protected by shared_get_mutex)"
     on_put: Optional[Callable]
-    "Callback after each put() operation."
+    "Callback after each put() operation. (Protected by shared_put_mutex)"
     shared: set['SharedQueue']
     "The set of SharedQueue instances sharing the same underlying Queue."
 
     _upstream: Optional['SharedQueue']
     _downstream: Optional['SharedQueue']
+
+    __ignore_profile_class__ = tuple()   # Classes to ignore in when profiling
 
     def __init__(self, maxsize: int = 0):
         self.maxsize = maxsize
@@ -172,16 +170,37 @@ class SharedQueue:
         # Originally, mutex is released during get/put blocking.
         # Now we use additionally locks for get/put respectively.
         # This avoids overlapping get/put time measurements.
-        self.self_get_lock = threading.Lock()
-        self.self_put_lock = threading.Lock()
-        self.shared_get_lock = None
-        self.shared_put_lock = None
+        self.self_get_mutex = threading.Lock()
+        self.self_put_mutex = threading.Lock()
+        self.shared_get_mutex = None
+        self.shared_put_mutex = None
         
         # Profiling info
+        self.start_time = 0.0
+        self.last_get_start_time = 0.0
+        self.last_get_end_time = 0.0
+        self.last_put_start_time = 0.0
+        self.last_put_end_time = 0.0
         self.total_get_time = 0.0
         self.total_put_time = 0.0
         self.count_get = 0
         self.count_put = 0
+
+    @property
+    def avg_get_pct(self):
+        if self.getable:
+            curr_time = perf_counter()
+            return self.total_get_time / (curr_time - self.start_time)
+        else:
+            return self.downstream.avg_get_pct
+
+    @property
+    def avg_put_pct(self):
+        if self.putable:
+            curr_time = perf_counter()
+            return self.total_put_time / (curr_time - self.start_time)
+        else:
+            return self.upstream.avg_put_pct
 
     @property
     def is_shutdown(self):
@@ -191,18 +210,23 @@ class SharedQueue:
 
     def init(self):
         if self.queue is None:
-            shared_put_lock = threading.RLock()
-            shared_get_lock = threading.RLock()
             if any(q.maxsize == 0 for q in self.shared):
                 maxsize = 0
             else:
                 maxsize = sum(q.maxsize for q in self.shared)
             queue = Queue(maxsize)
+            start_time = perf_counter()
+            shared_put_mutex = threading.RLock()
+            shared_get_mutex = threading.RLock()
             for q in self.shared:
                 assert q.queue is None, "SharedQueue has been unexpectedly initialized."
                 q.queue = queue
-                q.shared_put_lock = shared_put_lock
-                q.shared_get_lock = shared_get_lock
+                q.shared_put_mutex = shared_put_mutex
+                q.shared_get_mutex = shared_get_mutex
+                q.start_time = start_time
+            # Clear circular references
+            for q in self.shared:
+                del q.shared
 
     @property
     def upstream(self):
@@ -210,6 +234,8 @@ class SharedQueue:
 
     @upstream.setter
     def upstream(self, value: 'SharedQueue'):
+        if self.queue is not None:
+            raise RuntimeError("Cannot set upstream after SharedQueue is initialized.")
         if getattr(value, 'downstream', None) is not None and value.downstream is not self:
             raise RuntimeError("Cannot set upstream whose downstream is set and is not this queue.")
         shared = set((*self.shared, *value.shared))
@@ -223,6 +249,8 @@ class SharedQueue:
 
     @downstream.setter
     def downstream(self, value: 'SharedQueue'):
+        if self.queue is not None:
+            raise RuntimeError("Cannot set downstream after SharedQueue is initialized.")
         if getattr(value, 'upstream', None) is not None and value.upstream is not self:
             raise RuntimeError("Cannot set downstream whose upstream is set and is not this queue.")
         shared = set((*self.shared, *value.shared))
@@ -239,31 +267,31 @@ class SharedQueue:
         return self.upstream is None or self.upstream.downstream is self
 
     def get(self, block=True, timeout=None):
-        if self.downstream is not None and self.downstream.upstream is not self:
+        if not self.getable:
             raise RuntimeError("Cannot get from a queue with downstream. Items have gone to downstream queue.")
-        with self.self_get_lock:
+        with self.self_get_mutex:
             start_time = perf_counter()
-            with self.shared_get_lock:
+            with self.shared_get_mutex:
                 if self.on_get is not None:
                     self.on_get()
                 item = (self.upstream or self.queue).get(block=block, timeout=timeout)
             end_time = perf_counter()
-            if not isinstance(item, EndOfInput):
+            if not isinstance(item, SharedQueue.__ignore_profile_class__):
                 self.total_get_time += end_time - start_time
                 self.count_get += 1
             return item
         
     def put(self, item, block=True, timeout=None):
-        if self.upstream is not None and self.upstream.downstream is not self:
+        if not self.putable:
             raise RuntimeError("Cannot put to a queue with upstream. Items come from upstream queue.")
-        with self.self_put_lock:
+        with self.self_put_mutex:
             start_time = perf_counter()
-            with self.shared_put_lock:
+            with self.shared_put_mutex:
                 (self.downstream or self.queue).put(item, block=block, timeout=timeout)
                 if self.on_put is not None:
                     self.on_put()
             end_time = perf_counter()
-            if not isinstance(item, EndOfInput):
+            if not isinstance(item, SharedQueue.__ignore_profile_class__):
                 self.total_put_time += end_time - start_time
                 self.count_put += 1
 
