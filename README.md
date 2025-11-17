@@ -155,21 +155,27 @@ Sequential                  |      >>> / <<<<     |   0.0 % /   0.0 % |  69.3 % 
 └─2 Filter(fn=<lambda>)     |     <<<< / <<<<     | 100.0 % /   0.0 % |   0.0 % /  99.9 % |       - | 4.07 it/s / 2.04 it/s |    20 / 10      
 ```
 
-The indicators summarize the blocking status of each node. It can be interpreted as `Upstream vs. Me / Me vs Downstream`. The symbols `>` represent left is faster than and waiting for right, while `<` conversely. The number of symbols indicates the severity of the blocking (`=`: 0~5% `>`: 5%~25%, `>>`: 25%~50%, `>>>`: 50%~75%, `>>>>`: 75%~100%).
+The indicators summarize each node’s blocking status and can be read as **`Upstream vs Me / Me vs Downstream`**.  
+Symbols show who is faster: `>` means “left is faster and waiting for right,” `<` means the opposite.  
+The number of symbols reflects blocking severity:  
+`=`: 0–5%, `>`: 5–25%, `>>`: 25–50%, `>>>`: 50–75%, `>>>>`: 75–100%.
 
-A good practice is to follow the direction of the arrows which point towards the bottleneck. For example, if you see `>>> / <<<`, it indicates that the current node is a bottleneck and should be optimized. If you see `<<< / <<<`, it suggests that the upstream node is slow and needs improvement.
+A practical rule is to **follow the arrows**—they point toward the bottleneck.  
+For example:  
+- `>>> / <<<` means *this node* is the bottleneck.  
+- `<<< / <<<` means the *upstream node* is too slow.
 
-When you see both `>` and `<` at the same side, it does happen when the stream is unstable and fluctuating, indicating that the node is both waiting for and being waited by its upstream or downstream. Buffering components may help in this case.
+If both `>` and `<` appear on the same side, it usually indicates an unstable or fluctuating stream where the node alternates between waiting and being waited on. Adding buffering components can help smooth out these fluctuations.
 
 Here is a quick reference for the indicators:
 
-> Indicator | Problem Type | Suggested Actions
-> -------------|-------------| -----------------
-> `>>> / <<<` | Bottleneck | Consider optimizing this node / adding more parallelism.
-> `<<< / <<<` | Upstream slow | Consider improving upstream performance.
-> `>>> / >>>` | Downstream slow | Consider improving downstream performance.
-> `<<< / >>>` | Idle | This node may be over-provisioned.
-> `>><< / >><<` | Fluctuating | Consider adding buffering in between stages to smooth out fluctuations.
+Indicator | Problem Type | Suggested Actions
+-------------|-------------| -----------------
+`>>> / <<<` | Bottleneck | Consider optimizing this node / adding more parallelism.
+`<<< / <<<` | Upstream slow | Consider improving upstream performance.
+`>>> / >>>` | Downstream slow | Consider improving downstream performance.
+`<<< / >>>` | Idle | This node may be over-provisioned.
+`>><< / >><<` | Fluctuating | Consider adding buffering in between stages to smooth out fluctuations.
 
 
 ### Exception Handling
