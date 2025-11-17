@@ -190,25 +190,33 @@ with pipe:
             break
 ```
 
-1. Behavior of the node that raises an exception
-  - Stops processing: The node will no longer handle any further inputs.
-  - Cannot automatically recover: The node is considered "dead" for the remainder of the pipeline’s lifetime.
-2. Propagation of exceptions in the pipeline
-  - Downstream nodes continue working: Exceptions are passed along as results without stopping downstream nodes.
-  - Result order is preserved: Exceptions occupy the position corresponding to their input, maintaining the overall output order.
-3. Handling in the main thread and default behavior
-  - Default behavior if uncaught: An uncaught ExceptionInNode will typically exit the pipeline context, shutting down all nodes and terminating the program. This prevents partially failed nodes from silently continuing.
+<details>
+<summary>
+Exception behaviors (Click to expand)
+</summary>
+
+- Behavior of the node that raises an exception
+  - *Stops processing*: The node will no longer handle any further inputs.
+  - *Cannot automatically recover*: The node is considered "dead" for the remainder of the pipeline’s lifetime.
+- Propagation of exceptions in the pipeline
+  - *Downstream nodes continue working*: Exceptions are passed along as results without stopping downstream nodes.
+  - *Result order is preserved*: Exceptions occupy the position corresponding to their input, maintaining the overall output order.
+- Handling in the main thread and default behavior
+  - *Default behavior if uncaught*: An uncaught ExceptionInNode will typically exit the pipeline context, shutting down all nodes and terminating the program. This prevents partially failed nodes from silently continuing.
   - Continuing after an exception: You can catch ExceptionInNode in the main thread to allow the pipeline to keep running.
-4. Effect of exceptions on different component types
-  - Redundant components (e.g., Parallel):
+- Effect of exceptions on different component types
+  - *Redundant components* (e.g., Parallel):
     - Only the failing worker stops.
     - Other parallel workers continue processing their tasks.
     - The pipeline continues, but with reduced parallelism.
-  - Non-redundant components (e.g., Sequential):
+  - *Non-redundant components* (e.g., Sequential):
     - The failing node can no longer produce outputs.
     - Downstream nodes are blocked waiting for input.
     - The component (and possibly the pipeline) cannot progress further.
-5. Output order after exceptions
-  - Order is always preserved: Exceptions do not disrupt the correspondence between input and output.
-  - Catching exceptions does not break the sequence: If you catch the exception and continue iterating, subsequent valid results will still be yielded in order.
+- Output order after exceptions
+  - *Order is always preserved*: Exceptions do not disrupt the correspondence between input and output.
+  - *Catching exceptions does not break the sequence*: If you catch the exception and continue iterating, subsequent valid results will still be yielded in order.
+
+</details>
+
 
