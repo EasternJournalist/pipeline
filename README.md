@@ -92,7 +92,11 @@ Beyond `Parallel` and `Sequential`, the following components are available for f
     </tr>
     <tr>
       <td><code>Parallel</code></td>
-      <td>Runs a pool of parallel nodes.</td>
+      <td>Runs a pool of parallel nodes. Preserving FIFO order (if all nested nodes are FIFO).</td>
+    </tr>
+    <tr>
+      <td><code>UnorderedParallel</code></td>
+      <td>Runs a pool of parallel nodes and sends the results as soon as they are ready, without preserving the input order.</td>
     </tr>
     <!-- Batching -->
     <tr>
@@ -201,16 +205,11 @@ with pipe:
 Exception behaviors (Click to expand)
 </summary>
 
-- Behavior of the node that raises an exception
-  - *Stops processing*: The node will no longer handle any further inputs.
-  - *Cannot automatically recover*: The node is considered "dead" for the remainder of the pipeline’s lifetime.
-- Propagation of exceptions in the pipeline
-  - *Downstream nodes continue working*: Exceptions are passed along as results without stopping downstream nodes.
-  - *Result order is preserved*: Exceptions occupy the position corresponding to their input, maintaining the overall output order.
-- Handling in the main thread and default behavior
-  - *Default behavior if uncaught*: An uncaught ExceptionInNode will typically exit the pipeline context, shutting down all nodes and terminating the program. This prevents partially failed nodes from silently continuing.
-  - Continuing after an exception: You can catch ExceptionInNode in the main thread to allow the pipeline to keep running.
-- Effect of exceptions on different component types
+- The node that raises an exception will *stop processing* and is considered "dead" for the remainder of the pipeline’s lifetime.
+- Downstream nodes *continue working*. Exceptions are passed along as results without stopping downstream nodes.
+- *Result order is preserved*. Exceptions occupy the position corresponding to their input, maintaining the overall output order.
+- An *uncaught* `ExceptionInNode` will typically exit the pipeline context, shutting down all nodes and terminating the program. This prevents partially failed nodes from silently continuing. *If catching* `ExceptionInNode` in the main thread, it will allow the pipeline to keep running.
+- Whether the pipeline can continue processing after an exception depends on the type of component where the exception occurred:
   - *Redundant components* (e.g., Parallel):
     - Only the failing worker stops.
     - Other parallel workers continue processing their tasks.
@@ -219,9 +218,7 @@ Exception behaviors (Click to expand)
     - The failing node can no longer produce outputs.
     - Downstream nodes are blocked waiting for input.
     - The component (and possibly the pipeline) cannot progress further.
-- Output order after exceptions
-  - *Order is always preserved*: Exceptions do not disrupt the correspondence between input and output.
-  - *Catching exceptions does not break the sequence*: If you catch the exception and continue iterating, subsequent valid results will still be yielded in order.
+- If the pipeline is still able to produce futher outputs, the output order after exceptions is *always preserved*
 
 </details>
 

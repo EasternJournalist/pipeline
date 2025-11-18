@@ -21,6 +21,7 @@ __all__ = [
     'Buffer',
     'Sequential',
     'Parallel',
+    'UnorderedParallel',
     'Distribute',
     'Broadcast',
     'Switch',
@@ -111,16 +112,25 @@ class Node:
         self.start_time = time.perf_counter()
         self.input.init()
         self.output.init()
+        if hasattr(self, 'nodes'):
+            for node in self.nodes.values() if isinstance(self.nodes, dict) else self.nodes:
+                node.start()
 
     def shutdown(self):
         "Send shutdown signal without waiting for threads/processes to finish. NOTE: Once shutdown is called, the node cannot be restarted."
         self.is_shutdown = True
         self.input.shutdown()
         self.output.shutdown()
+        if hasattr(self, 'nodes'):
+            for node in self.nodes.values() if isinstance(self.nodes, dict) else self.nodes:
+                node.shutdown()
 
     def stop(self):
         "Stop the node and wait for all threads/processes to finish. NOTE: Once stop is called, the node cannot be restarted."
         self.shutdown()
+        if hasattr(self, 'nodes'):
+            for node in self.nodes.values() if isinstance(self.nodes, dict) else self.nodes:
+                node.stop()
 
     def put(self, data: Any, timeout: float = None) -> None:
         "Put data into the input queue. Blocks if the input queue is full."
@@ -521,16 +531,6 @@ class Sequential(Node):
         self.nodes[-1].output.downstream = self.output
         self.output.upstream = self.nodes[-1].output
 
-    def start(self):
-        super().start()
-        for node in self.nodes:
-            node.start()
-
-    def stop(self):
-        super().stop()
-        for node in self.nodes:
-            node.stop()
-
 
 class Parallel(ThreadingNode):
     """
@@ -576,22 +576,42 @@ class Parallel(ThreadingNode):
                 self.output.put(item)
         except ShutDown:
             return
-
-    def start(self):
-        super().start()
-        for node in self.nodes:
-            node.start()
     
     def shutdown(self):
         super().shutdown()
         self.fifo_order.shutdown()
-        for node in self.nodes:
-            node.shutdown()
 
-    def stop(self):
-        super().stop()
-        for node in self.nodes:
-            node.stop()
+
+
+class UnorderedParallel(Node):
+    """
+    A node that runs multiple nodes in parallel to process the input items. Each input item is handed to one of the nodes whoever is available.
+    The output items are yielded as soon as they are ready, without preserving the input order.
+    """
+    nodes: List[Node]
+
+    def __init__(self, nodes_or_callable: Union[Callable, Sequence[Union[Node, Callable]]], num_duplicates: int = None, name: Optional[str] = None):
+        super().__init__(name=name)
+        self.num_duplicates = num_duplicates
+        if isinstance(nodes_or_callable, Callable):
+            assert num_duplicates is not None, "Duplicates count must be specified for callable"
+            self.nodes = [Worker(nodes_or_callable) for _ in range(num_duplicates)]
+        else:
+            self.nodes = []
+            for node in nodes_or_callable:
+                if isinstance(node, Node):
+                    pass
+                elif isinstance(node, Callable):
+                    if inspect.isgeneratorfunction(node):
+                        node = Source(node)
+                    else:
+                        node = Worker(node)
+                else:
+                    raise ValueError(f"Invalid node type: {type(node)}")
+                self.nodes.append(node)
+        for i, node in enumerate(self.nodes):
+            node.input.upstream = self.input
+            node.output.downstream = self.output
 
 
 class Distribute(ThreadingNode):
@@ -640,21 +660,6 @@ class Distribute(ThreadingNode):
                 self.output.put(item)
         except ShutDown:
             return
-
-    def start(self):
-        for node in self.nodes.values():
-            node.start()
-        super().start()
-
-    def shutdown(self):
-        for node in self.nodes.values():
-            node.shutdown()
-        super().shutdown()  
-
-    def stop(self):
-        for node in self.nodes.values():
-            node.stop()
-        super().stop()
 
 
 class Switch(ThreadingNode):
@@ -707,22 +712,6 @@ class Switch(ThreadingNode):
                 self.output.put(item)
         except ShutDown:
             return
-        
-    def start(self):
-        super().start()
-        for node in self.nodes.values():
-            node.start()
-
-    def shutdown(self):
-        super().shutdown()
-        self.fifo_order.shutdown()
-        for node in self.nodes.values():
-            node.shutdown()
-
-    def stop(self):
-        super().stop()
-        for node in self.nodes.values():
-            node.stop()
 
 
 class Router(ThreadingNode):
@@ -782,21 +771,10 @@ class Router(ThreadingNode):
     def shutdown(self):
         super().shutdown()
         self.fifo_order.shutdown()
-        for node in self.nodes.values():
-            node.shutdown()
-
-    def start(self):
-        super().start()
-        for node in self.nodes.values():
-            node.start()
-
-    def stop(self):
-        super().stop()
-        for node in self.nodes.values():
-            node.stop()
 
 
 class Broadcast(ThreadingNode):
+    "Copy and send each input item to all child nodes and collects their outputs."
 
     def __init__(self, nodes: Union[List[Union[Node, Callable]], Dict[str, Union[Node, Callable]]], name: Optional[str] = None):
         super().__init__(name=name)
@@ -855,13 +833,3 @@ class Broadcast(ThreadingNode):
                 self.output.put(item)
         except ShutDown:
             return
-        
-    def start(self):
-        super().start()
-        for node in self.nodes.values():
-            node.start()
-
-    def stop(self):
-        super().stop()
-        for node in self.nodes.values():
-            node.stop()
