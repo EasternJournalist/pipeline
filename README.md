@@ -86,7 +86,7 @@ Beyond `Parallel` and `Sequential`, the following components are available for f
     </tr>
     <!-- Execution -->
     <tr>
-      <td rowspan="2">Structural</td>
+      <td rowspan="3">Structural</td>
       <td><code>Sequential</code></td>
       <td>Pipeline of nodes in a sequential order.</td>
     </tr>
