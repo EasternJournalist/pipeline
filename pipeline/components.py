@@ -363,7 +363,7 @@ class Source(ThreadingNode):
         except ShutDown:
             return
         except Exception as e:
-            self.output.put(ExceptionInNode(e, traceback.format_exc()))
+            self.output.put(ExceptionInNode(e, self))
             return
 
     def _default_name(self):
@@ -698,7 +698,7 @@ class Switch(ThreadingNode):
         except ShutDown:
             return
         except Exception as e:
-            self.fifo_order.put(ExceptionInNode(e, traceback.format_exc()))
+            self.fifo_order.put(ExceptionInNode(e, self))
             return
 
     def _out_thread_fn(self):
@@ -746,7 +746,7 @@ class Router(ThreadingNode):
                 try:
                     keys = self.predicate(item)
                 except Exception as e:
-                    self.fifo_order.put(ExceptionInNode(e, traceback.format_exc()))
+                    self.fifo_order.put(ExceptionInNode(e, self))
                     continue
                 if any(k not in self.nodes for k in keys) or any(k not in keys for k in self.nodes):
                     raise ValueError(f"Switch block key mismatches. Input keys: {list(keys)}. Expected keys: {list(self.nodes.keys())}.")
